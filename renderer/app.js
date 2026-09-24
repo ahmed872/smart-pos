@@ -346,8 +346,8 @@ async function showSaleDetail(saleId) {
       const qty = Number(document.getElementById(`retQty-${saleItemId}`).value);
       const reason = document.getElementById(`retReason-${saleItemId}`).value.trim();
       try {
-        await window.api.returns.create({ saleId: saleIdVal, saleItemId, qty, reason });
-        alert('تم تسجيل الإرجاع');
+        const result = await window.api.returns.create({ saleId: saleIdVal, saleItemId, qty, reason });
+        alert(`تم تسجيل الإرجاع. المبلغ المسترد: ${result.refundedAmount.toFixed(2)} ${settings.currency || ''}`);
         showSaleDetail(saleIdVal);
         products = await window.api.products.list();
         renderProductGrid();
@@ -530,6 +530,23 @@ function setupSettingsHandlers() {
   });
 }
 
+// Same rows, in the same order, as the PDF report and the Excel export.
+function summaryRows(summary) {
+  const currency = settings.currency || '';
+  const money = (n) => `${n.toFixed(2)} ${currency}`;
+  return [
+    ['عدد الفواتير', summary.invoiceCount],
+    ['إجمالي المبيعات قبل الخصم', money(summary.grossSales)],
+    ['الخصومات', money(summary.totalDiscount)],
+    ['المرتجعات (شاملة الضريبة)', money(summary.totalReturns)],
+    ['صافي المبيعات (بدون ضريبة)', money(summary.netSales)],
+    ['صافي الضريبة', money(summary.netTax)],
+    ['الصافي شامل الضريبة', money(summary.netTotal)],
+    ['التكلفة', money(summary.totalCost)],
+    ['صافي الربح', money(summary.profit), true],
+  ];
+}
+
 function setupReportsHandlers() {
   document.getElementById('loadReportBtn').addEventListener('click', async () => {
     const from = document.getElementById('reportFrom').value;
@@ -540,12 +557,9 @@ function setupReportsHandlers() {
 
     box.innerHTML = `
       <div class="card-box" style="max-width:700px;">
-        <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;"><span>عدد الفواتير</span><span>${summary.invoiceCount}</span></div>
-        <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;"><span>إجمالي المبيعات</span><span>${summary.grossSales.toFixed(2)} ${currency}</span></div>
-        <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;"><span>إجمالي المرتجعات</span><span>${summary.totalReturns.toFixed(2)} ${currency}</span></div>
-        <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;"><span>صافي المبيعات</span><span>${summary.netSales.toFixed(2)} ${currency}</span></div>
-        <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;"><span>التكلفة</span><span>${summary.totalCost.toFixed(2)} ${currency}</span></div>
-        <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;font-weight:bold;color:var(--accent);"><span>صافي الربح</span><span>${summary.profit.toFixed(2)} ${currency}</span></div>
+        ${summaryRows(summary).map(([label, value, strong]) => `
+          <div class="row" style="display:flex;justify-content:space-between;margin:6px 0;${strong ? 'font-weight:bold;color:var(--accent);' : ''}"><span>${label}</span><span>${value}</span></div>
+        `).join('')}
       </div>
       <h3>الأكثر مبيعًا</h3>
       <table>

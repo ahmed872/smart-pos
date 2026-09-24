@@ -26,9 +26,12 @@ async function render() {
     <h2>الملخص</h2>
     <table class="summary-table">
       <tr><td>عدد الفواتير</td><td>${summary.invoiceCount}</td></tr>
-      <tr><td>إجمالي المبيعات</td><td>${summary.grossSales.toFixed(2)} ${currency}</td></tr>
-      <tr><td>إجمالي المرتجعات</td><td>${summary.totalReturns.toFixed(2)} ${currency}</td></tr>
-      <tr><td>صافي المبيعات</td><td>${summary.netSales.toFixed(2)} ${currency}</td></tr>
+      <tr><td>إجمالي المبيعات قبل الخصم</td><td>${summary.grossSales.toFixed(2)} ${currency}</td></tr>
+      <tr><td>الخصومات</td><td>${summary.totalDiscount.toFixed(2)} ${currency}</td></tr>
+      <tr><td>المرتجعات (شاملة الضريبة)</td><td>${summary.totalReturns.toFixed(2)} ${currency}</td></tr>
+      <tr><td>صافي المبيعات (بدون ضريبة)</td><td>${summary.netSales.toFixed(2)} ${currency}</td></tr>
+      <tr><td>صافي الضريبة</td><td>${summary.netTax.toFixed(2)} ${currency}</td></tr>
+      <tr><td>الصافي شامل الضريبة</td><td>${summary.netTotal.toFixed(2)} ${currency}</td></tr>
       <tr><td>التكلفة</td><td>${summary.totalCost.toFixed(2)} ${currency}</td></tr>
       <tr><td>صافي الربح</td><td>${summary.profit.toFixed(2)} ${currency}</td></tr>
     </table>

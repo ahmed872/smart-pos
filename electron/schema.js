@@ -96,6 +96,10 @@ const MIGRATED_COLUMNS = [
   { table: 'products', column: 'image_data_url', definition: 'TEXT' },
   { table: 'users', column: 'pin_hash', definition: 'TEXT' },
   { table: 'users', column: 'must_change_pin', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  // Share of the invoice discount and tax carried by each return (0 for returns recorded before
+  // these columns existed, whose refunded_amount was simply qty * unit_price).
+  { table: 'returns', column: 'discount_share', definition: 'REAL NOT NULL DEFAULT 0' },
+  { table: 'returns', column: 'tax_share', definition: 'REAL NOT NULL DEFAULT 0' },
 ];
 
 function applySchema(db) {

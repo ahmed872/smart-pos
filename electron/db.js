@@ -104,6 +104,68 @@ if (!hasLogo) {
   db.prepare("INSERT INTO settings (key, value) VALUES ('logo_data_url', ?)").run(DEFAULT_LOGO_DATA_URL);
 }
 
+// ---------- Financial model (single source for reports and daily closing) ----------
+// Per invoice: taxable = subtotal - discount, tax = taxable * rate, total = taxable + tax.
+// Revenue excludes tax (tax is collected for the authority): revenue = total - tax. Using
+// total - tax instead of subtotal - discount also stays correct for invoices recorded before the
+// discount was capped at the subtotal. Profit = net revenue - net cost, i.e. before tax.
+// A return reverses qty * unit_price minus its discount share plus its tax share.
+// Sales are attributed to their invoice date and returns to the date they were recorded.
+function periodTotals(fromTs, toTs) {
+  // Invoice-level amounts come only from the sales table (never joined to its items), so each
+  // invoice's discount/tax/total is counted exactly once.
+  const s = db.prepare(`
+    SELECT
+      COUNT(*) AS invoice_count,
+      COALESCE(SUM(subtotal), 0) AS subtotal,
+      COALESCE(SUM(total - tax), 0) AS revenue,
+      COALESCE(SUM(tax), 0) AS tax,
+      COALESCE(SUM(total), 0) AS total,
+      COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total ELSE 0 END), 0) AS cash,
+      COALESCE(SUM(CASE WHEN payment_method = 'card' THEN total ELSE 0 END), 0) AS card
+    FROM sales
+    WHERE created_at BETWEEN ? AND ?
+  `).get(fromTs, toTs);
+  const cost = db.prepare(`
+    SELECT COALESCE(SUM(si.qty * si.unit_cost), 0) AS cost
+    FROM sale_items si
+    JOIN sales s ON s.id = si.sale_id
+    WHERE s.created_at BETWEEN ? AND ?
+  `).get(fromTs, toTs).cost;
+  // One row per return (each return references exactly one sale item).
+  const r = db.prepare(`
+    SELECT
+      COUNT(*) AS return_count,
+      COALESCE(SUM(r.refunded_amount), 0) AS amount,
+      COALESCE(SUM(r.tax_share), 0) AS tax,
+      COALESCE(SUM(r.qty * si.unit_cost), 0) AS cost
+    FROM returns r
+    JOIN sale_items si ON si.id = r.sale_item_id
+    WHERE r.created_at BETWEEN ? AND ?
+  `).get(fromTs, toTs);
+
+  const returnsRevenue = r.amount - r.tax;
+  const netSales = s.revenue - returnsRevenue;
+  const netCost = cost - r.cost;
+  return {
+    invoiceCount: s.invoice_count,
+    grossSales: s.subtotal, // before discount and tax
+    totalDiscount: s.subtotal - s.revenue,
+    totalTax: s.tax,
+    salesTotal: s.total, // what customers paid (after discount, including tax)
+    cash: s.cash,
+    card: s.card,
+    returnsCount: r.return_count,
+    totalReturns: r.amount, // refunded to customers, including tax
+    returnsTax: r.tax,
+    netSales, // revenue after discounts and returns, excluding tax
+    netTax: s.tax - r.tax,
+    netTotal: s.total - r.amount, // = netSales + netTax
+    totalCost: netCost,
+    profit: netSales - netCost,
+  };
+}
+
 function publicUser(user) {
   return { id: user.id, username: user.username, role: user.role, mustChangePin: !!user.must_change_pin };
 }
@@ -467,11 +529,19 @@ module.exports = {
       throw new Error('الكمية المطلوب إرجاعها غير صحيحة');
     }
 
-    const refundedAmount = qty * item.unit_price;
+    // The returned goods carry their proportional share of the invoice discount and tax, so a
+    // refund reverses exactly what the customer paid for them (see periodTotals for the model).
+    const sale = db.prepare('SELECT subtotal, tax, total FROM sales WHERE id = ?').get(saleId);
+    const lineGross = qty * item.unit_price;
+    const fraction = sale && sale.subtotal > 0 ? lineGross / sale.subtotal : 0;
+    const effectiveDiscount = sale ? Math.max(sale.subtotal - (sale.total - sale.tax), 0) : 0;
+    const discountShare = effectiveDiscount * fraction;
+    const taxShare = (sale ? sale.tax : 0) * fraction;
+    const refundedAmount = lineGross - discountShare + taxShare;
 
     const insertReturn = db.prepare(`
-      INSERT INTO returns (sale_id, sale_item_id, product_id, qty, refunded_amount, reason, user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO returns (sale_id, sale_item_id, product_id, qty, refunded_amount, discount_share, tax_share, reason, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const restoreStock = db.prepare(`
       UPDATE products SET stock_qty = stock_qty + ? WHERE id = ? AND track_stock = 1
@@ -482,7 +552,7 @@ module.exports = {
 
     const tx = db.transaction(() => {
       const returnId = insertReturn.run(
-        saleId, saleItemId, item.product_id, qty, refundedAmount, reason || null, userId || null
+        saleId, saleItemId, item.product_id, qty, refundedAmount, discountShare, taxShare, reason || null, userId || null
       ).lastInsertRowid;
       if (item.product_id) {
         restoreStock.run(qty, item.product_id);
@@ -491,7 +561,7 @@ module.exports = {
       return returnId;
     });
 
-    return { returnId: tx(), refundedAmount };
+    return { returnId: tx(), refundedAmount, discountShare, taxShare };
   },
 
   getReturnsForSale(saleId) {
@@ -519,28 +589,7 @@ module.exports = {
   // ---------- Reports ----------
   getSalesSummary(fromDate, toDate) {
     const range = { from: `${fromDate} 00:00:00`, to: `${toDate} 23:59:59` };
-
-    const totals = db.prepare(`
-      SELECT
-        COUNT(DISTINCT s.id) AS invoice_count,
-        COALESCE(SUM(si.line_total), 0) AS gross_sales,
-        COALESCE(SUM(si.qty * si.unit_cost), 0) AS total_cost,
-        COALESCE(SUM(s.discount), 0) AS total_discount,
-        COALESCE(SUM(s.tax), 0) AS total_tax
-      FROM sales s
-      JOIN sale_items si ON si.sale_id = s.id
-      WHERE s.created_at BETWEEN ? AND ?
-    `).get(range.from, range.to);
-
-    const totalReturns = db.prepare(`
-      SELECT COALESCE(SUM(r.refunded_amount), 0) AS amount, COALESCE(SUM(r.qty * si.unit_cost), 0) AS cost
-      FROM returns r
-      JOIN sale_items si ON si.id = r.sale_item_id
-      WHERE r.created_at BETWEEN ? AND ?
-    `).get(range.from, range.to);
-
-    const netSales = totals.gross_sales - totalReturns.amount;
-    const netCost = totals.total_cost - totalReturns.cost;
+    const totals = periodTotals(range.from, range.to);
 
     const topProducts = db.prepare(`
       SELECT si.name, SUM(si.qty) AS qty_sold, SUM(si.line_total) AS revenue
@@ -552,55 +601,19 @@ module.exports = {
       LIMIT 10
     `).all(range.from, range.to);
 
-    return {
-      invoiceCount: totals.invoice_count,
-      grossSales: totals.gross_sales,
-      totalReturns: totalReturns.amount,
-      netSales,
-      totalCost: netCost,
-      profit: netSales - netCost,
-      totalDiscount: totals.total_discount,
-      totalTax: totals.total_tax,
-      topProducts,
-    };
+    return { ...totals, topProducts };
   },
 
   getDailyClosing(date) {
     const range = { from: `${date} 00:00:00`, to: `${date} 23:59:59` };
-
-    const byPayment = db.prepare(`
-      SELECT payment_method, COALESCE(SUM(total), 0) AS total, COUNT(*) AS cnt
-      FROM sales
-      WHERE created_at BETWEEN ? AND ?
-      GROUP BY payment_method
-    `).all(range.from, range.to);
-
-    const cash = byPayment.find((p) => p.payment_method === 'cash')?.total || 0;
-    const card = byPayment.find((p) => p.payment_method === 'card')?.total || 0;
-    const invoiceCount = byPayment.reduce((sum, p) => sum + p.cnt, 0);
-
-    const totals = db.prepare(`
-      SELECT COALESCE(SUM(discount), 0) AS discount, COALESCE(SUM(tax), 0) AS tax, COALESCE(SUM(total), 0) AS total
-      FROM sales
-      WHERE created_at BETWEEN ? AND ?
-    `).get(range.from, range.to);
-
-    const returns = db.prepare(`
-      SELECT COALESCE(SUM(refunded_amount), 0) AS amount
-      FROM returns
-      WHERE created_at BETWEEN ? AND ?
-    `).get(range.from, range.to);
-
+    const t = periodTotals(range.from, range.to);
     return {
+      ...t,
       date,
-      invoiceCount,
-      cash,
-      card,
-      grossTotal: totals.total,
-      discount: totals.discount,
-      tax: totals.tax,
-      returns: returns.amount,
-      netTotal: totals.total - returns.amount,
+      grossTotal: t.salesTotal,
+      discount: t.totalDiscount,
+      tax: t.totalTax,
+      returns: t.totalReturns,
     };
   },
 

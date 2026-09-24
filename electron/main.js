@@ -262,9 +262,12 @@ async function exportReportExcel(fromDate, toDate) {
   summarySheet.addRows([
     ['الفترة', `${fromDate} إلى ${toDate}`],
     ['عدد الفواتير', summary.invoiceCount],
-    ['إجمالي المبيعات', summary.grossSales],
-    ['إجمالي المرتجعات', summary.totalReturns],
-    ['صافي المبيعات', summary.netSales],
+    ['إجمالي المبيعات قبل الخصم', summary.grossSales],
+    ['الخصومات', summary.totalDiscount],
+    ['المرتجعات (شاملة الضريبة)', summary.totalReturns],
+    ['صافي المبيعات (بدون ضريبة)', summary.netSales],
+    ['صافي الضريبة', summary.netTax],
+    ['الصافي شامل الضريبة', summary.netTotal],
     ['التكلفة', summary.totalCost],
     ['صافي الربح', summary.profit],
   ]);
