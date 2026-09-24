@@ -21,7 +21,7 @@ function createLegacyDatabase(home, users) {
       role TEXT NOT NULL DEFAULT 'cashier', is_active INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE sales (id INTEGER PRIMARY KEY AUTOINCREMENT, sale_number TEXT NOT NULL UNIQUE, user_id INTEGER REFERENCES users(id),
-      customer_id INTEGER, subtotal REAL NOT NULL, discount REAL NOT NULL DEFAULT 0, tax REAL NOT NULL DEFAULT 0,
+      customer_id INTEGER REFERENCES customers(id), subtotal REAL NOT NULL, discount REAL NOT NULL DEFAULT 0, tax REAL NOT NULL DEFAULT 0,
       total REAL NOT NULL, payment_method TEXT NOT NULL DEFAULT 'cash', kitchen_status TEXT NOT NULL DEFAULT 'none',
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));
     CREATE TABLE customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, notes TEXT);

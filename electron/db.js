@@ -6,6 +6,7 @@ const Database = require('better-sqlite3');
 const DEFAULT_LOGO_DATA_URL = require('./default-logo.js');
 const { hashPin, verifyPin, burnVerify, isDisclosedDefaultPin, pinPolicyError } = require('./auth.js');
 const v = require('./validation.js');
+const { applySchema } = require('./schema.js');
 
 const dbDir = path.join(app.getPath('appData'), 'SystemDB');
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
@@ -26,116 +27,13 @@ const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL UNIQUE,
-  is_kitchen INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS products (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  barcode TEXT UNIQUE,
-  category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-  price REAL NOT NULL DEFAULT 0,
-  cost REAL NOT NULL DEFAULT 0,
-  stock_qty REAL NOT NULL DEFAULT 0,
-  track_stock INTEGER NOT NULL DEFAULT 1,
-  is_active INTEGER NOT NULL DEFAULT 1,
-  image_data_url TEXT
-);
-
-CREATE TABLE IF NOT EXISTS customers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  phone TEXT,
-  notes TEXT
-);
-
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL UNIQUE,
-  pin TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'cashier',
-  is_active INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS sales (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  sale_number TEXT NOT NULL UNIQUE,
-  user_id INTEGER REFERENCES users(id),
-  customer_id INTEGER REFERENCES customers(id),
-  subtotal REAL NOT NULL,
-  discount REAL NOT NULL DEFAULT 0,
-  tax REAL NOT NULL DEFAULT 0,
-  total REAL NOT NULL,
-  payment_method TEXT NOT NULL DEFAULT 'cash',
-  kitchen_status TEXT NOT NULL DEFAULT 'none',
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS sale_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
-  product_id INTEGER REFERENCES products(id),
-  name TEXT NOT NULL,
-  qty REAL NOT NULL,
-  unit_price REAL NOT NULL,
-  unit_cost REAL NOT NULL DEFAULT 0,
-  line_total REAL NOT NULL,
-  is_kitchen_item INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS returns (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  sale_id INTEGER NOT NULL REFERENCES sales(id),
-  sale_item_id INTEGER NOT NULL REFERENCES sale_items(id),
-  product_id INTEGER REFERENCES products(id),
-  qty REAL NOT NULL,
-  refunded_amount REAL NOT NULL,
-  reason TEXT,
-  user_id INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS stock_movements (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product_id INTEGER NOT NULL REFERENCES products(id),
-  change_qty REAL NOT NULL,
-  reason TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
-`);
-
-// Lightweight migration for databases created before unit_cost existed.
-const saleItemCols = db.prepare("PRAGMA table_info(sale_items)").all().map((c) => c.name);
-if (!saleItemCols.includes('unit_cost')) {
-  db.exec('ALTER TABLE sale_items ADD COLUMN unit_cost REAL NOT NULL DEFAULT 0');
-}
-
-// Lightweight migration for databases created before product images existed.
-const productCols = db.prepare("PRAGMA table_info(products)").all().map((c) => c.name);
-if (!productCols.includes('image_data_url')) {
-  db.exec('ALTER TABLE products ADD COLUMN image_data_url TEXT');
-}
+applySchema(db);
 
 // Migration: PINs used to be stored and compared in plaintext. Each legacy PIN is
 // hashed into pin_hash and the plaintext column is overwritten with random bytes
 // (the column is NOT NULL, and an older build must never match an empty value).
 // Accounts still on a publicly disclosed default PIN must choose a new one at next login.
-const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
-if (!userCols.includes('pin_hash')) {
-  db.exec('ALTER TABLE users ADD COLUMN pin_hash TEXT');
-}
-if (!userCols.includes('must_change_pin')) {
-  db.exec('ALTER TABLE users ADD COLUMN must_change_pin INTEGER NOT NULL DEFAULT 0');
-}
+// (The pin_hash / must_change_pin columns themselves are added by applySchema.)
 function unusableLegacyPin() {
   return '!' + crypto.randomBytes(32).toString('hex');
 }
@@ -313,7 +211,10 @@ module.exports = {
   saveUser(user) {
     if (!user || typeof user !== 'object') throw new v.ValidationError('بيانات المستخدم غير صالحة');
     const username = v.requiredText(user.username, 'اسم المستخدم', 50);
-    const role = v.oneOf(user.role || 'cashier', 'الصلاحية', ['admin', 'cashier']);
+    // On update, the role only changes when the caller explicitly sends one; otherwise the
+    // user keeps their current role (changing a PIN must never change permissions).
+    const roleGiven = user.role !== undefined && user.role !== null && user.role !== '';
+    const requestedRole = roleGiven ? v.oneOf(user.role, 'الصلاحية', ['admin', 'cashier']) : null;
     const hasPin = user.pin !== undefined && user.pin !== null && user.pin !== '';
     if (hasPin) {
       const policyError = pinPolicyError(user.pin);
@@ -326,6 +227,7 @@ module.exports = {
       return db.transaction(() => {
         const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
         if (!existing) throw new v.ValidationError('المستخدم غير موجود');
+        const role = requestedRole || existing.role;
         if (existing.role === 'admin' && existing.is_active && role !== 'admin') assertAnotherActiveAdmin(id);
         if (pinHash) {
           db.prepare('UPDATE users SET username=?, pin_hash=?, must_change_pin=0, role=? WHERE id=?')
@@ -338,7 +240,7 @@ module.exports = {
     }
     if (!pinHash) throw new v.ValidationError('الرقم السري مطلوب');
     const info = db.prepare('INSERT INTO users (username, pin, pin_hash, role) VALUES (?, ?, ?, ?)')
-      .run(username, unusableLegacyPin(), pinHash, role);
+      .run(username, unusableLegacyPin(), pinHash, requestedRole || 'cashier');
     return info.lastInsertRowid;
   },
 

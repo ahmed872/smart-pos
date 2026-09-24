@@ -190,26 +190,53 @@ async function restoreBackup() {
     return false;
   }
 
-  let safetyPath;
+  // Preferred: a validated copy of the current data. If the current database is damaged and
+  // cannot be copied, recovery from the (already validated) backup still goes ahead; the
+  // damaged files are then quarantined instead of overwritten.
+  let safetyPath = null;
   try {
     safetyPath = await backup.createSafetyBackup(store.db, store.dbPath);
   } catch {
+    safetyPath = null;
+  }
+
+  try {
+    store.db.close();
+  } catch {
+    // A damaged database may fail to close cleanly; its files are handled below either way.
+  }
+
+  let quarantineDir = null;
+  try {
+    if (safetyPath) {
+      backup.swapInStaged(stagedPath, store.dbPath);
+    } else {
+      quarantineDir = backup.quarantineLiveDb(store.dbPath);
+      try {
+        backup.installStaged(stagedPath, store.dbPath);
+      } catch (err) {
+        backup.releaseQuarantine(quarantineDir, store.dbPath);
+        quarantineDir = null;
+        throw err;
+      }
+    }
+  } catch {
+    // Every step above is a rename: on failure the original database is back in place.
     backup.discardStaged(stagedPath);
-    await dialog.showMessageBox(mainWindow, {
-      type: 'error',
-      title: 'تعذرت الاستعادة',
-      message: 'تعذر حفظ نسخة أمان من البيانات الحالية، لذلك تم إلغاء الاستعادة ولم يتم تغيير أي بيانات.',
-    });
+    dialog.showErrorBox('تعذرت الاستعادة', 'لم يتم تغيير البيانات.'
+      + (safetyPath ? '\nنسخة الأمان محفوظة في:\n' + safetyPath : '') + '\nسيتم إعادة تشغيل البرنامج.');
+    app.relaunch();
+    app.exit(0);
     return false;
   }
 
-  store.db.close();
-  try {
-    backup.swapInStaged(stagedPath, store.dbPath);
-  } catch {
-    // The rename is atomic: on failure the original database file is still in place.
-    backup.discardStaged(stagedPath);
-    dialog.showErrorBox('تعذرت الاستعادة', 'لم يتم تغيير البيانات. نسخة الأمان محفوظة في:\n' + safetyPath + '\nسيتم إعادة تشغيل البرنامج.');
+  if (quarantineDir) {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'تمت الاستعادة',
+      message: 'تمت الاستعادة بنجاح. قاعدة البيانات السابقة كانت تالفة ولم يمكن أخذ نسخة أمان منها، '
+        + 'لذلك تم نقل ملفاتها كما هي إلى:\n' + quarantineDir + '\nسيتم إعادة تشغيل البرنامج.',
+    });
   }
 
   app.relaunch();

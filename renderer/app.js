@@ -610,19 +610,28 @@ async function refreshUsersTable() {
 }
 
 function setupUsersHandlers() {
+  // The role dropdown defaults to "cashier", so for an existing user its value only counts
+  // as a new role when the admin actually changed it.
+  let roleChangedByUser = false;
+  document.getElementById('uRole').addEventListener('change', () => { roleChangedByUser = true; });
+
   document.getElementById('saveUserBtn').addEventListener('click', async () => {
     const username = document.getElementById('uUsername').value.trim();
     const pin = document.getElementById('uPin').value.trim();
     const role = document.getElementById('uRole').value;
     if (!username || !pin) { alert('اسم المستخدم والرقم السري مطلوبان'); return; }
-    // Saving an existing username updates that user's PIN and role.
+    // Saving an existing username updates that user's PIN, and their role only if it was changed.
     const existing = usersList.find((u) => u.username === username);
+    const payload = existing
+      ? { id: existing.id, username, pin, ...(roleChangedByUser ? { role } : {}) }
+      : { username, pin, role };
     try {
-      await window.api.users.save({ id: existing ? existing.id : undefined, username, pin, role });
+      await window.api.users.save(payload);
     } catch (err) {
       alert(err.message);
       return;
     }
+    roleChangedByUser = false;
     document.getElementById('uUsername').value = '';
     document.getElementById('uPin').value = '';
     await refreshUsersTable();
