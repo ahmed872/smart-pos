@@ -1,15 +1,50 @@
 const path = require('node:path');
 const fs = require('node:fs');
+const { fileURLToPath } = require('node:url');
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const QRCode = require('qrcode');
 const ExcelJS = require('exceljs');
+const backup = require('./backup.js');
+const v = require('./validation.js');
 
 let store;
 let mainWindow;
 let kitchenWindow;
-let currentUser = null;
+// Id of the logged-in user. The user row is re-read from the database on every
+// request (see authorize), so role changes and deactivation apply immediately.
+let sessionUserId = null;
 
-const appIconPath = path.join(__dirname, '..', 'renderer', 'assets', 'app-icon.png');
+const rendererDir = path.join(__dirname, '..', 'renderer');
+const appIconPath = path.join(rendererDir, 'assets', 'app-icon.png');
+
+// DevTools give full access to window.api, so they only exist in development builds.
+function secureWebPreferences() {
+  return {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+    devTools: !app.isPackaged,
+  };
+}
+
+// Switches that would let someone attach a debugger to the app. The matching Node
+// options (--inspect, NODE_OPTIONS, ELECTRON_RUN_AS_NODE) are disabled with Electron
+// fuses at package time (scripts/after-pack-fuses.js).
+const DEBUG_SWITCHES = ['remote-debugging-port', 'remote-debugging-pipe', 'inspect', 'inspect-brk', 'inspect-port'];
+
+// True only for the app's own bundled pages (file:// URLs inside the renderer folder).
+function isAppPageUrl(url) {
+  if (typeof url !== 'string' || !url.startsWith('file:')) return false;
+  let filePath;
+  try {
+    filePath = fileURLToPath(url);
+  } catch {
+    return false;
+  }
+  const rel = path.relative(rendererDir, filePath);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -17,11 +52,7 @@ function createMainWindow() {
     height: 800,
     title: 'سيستم كاشير',
     icon: appIconPath,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: secureWebPreferences(),
   });
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'login.html'));
 }
@@ -36,11 +67,7 @@ function createKitchenWindow() {
     height: 700,
     title: 'شاشة المطبخ - سيستم كاشير',
     icon: appIconPath,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: secureWebPreferences(),
   });
   kitchenWindow.loadFile(path.join(__dirname, '..', 'renderer', 'kitchen.html'));
   kitchenWindow.on('closed', () => {
@@ -54,11 +81,7 @@ function printReceipt(saleId) {
       width: 380,
       height: 600,
       show: false,
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
+      webPreferences: secureWebPreferences(),
     });
     receiptWindow.loadFile(path.join(__dirname, '..', 'renderer', 'receipt.html'), {
       query: { saleId: String(saleId) },
@@ -79,11 +102,7 @@ function printDayClose(date) {
       width: 380,
       height: 600,
       show: false,
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
+      webPreferences: secureWebPreferences(),
     });
     closeWindow.loadFile(path.join(__dirname, '..', 'renderer', 'day-close.html'), {
       query: { date },
@@ -110,11 +129,7 @@ async function exportReportPdf(fromDate, toDate) {
     width: 900,
     height: 700,
     show: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: secureWebPreferences(),
   });
 
   await reportWindow.loadFile(path.join(__dirname, '..', 'renderer', 'report-print.html'), {
@@ -149,21 +164,52 @@ async function restoreBackup() {
   });
   if (canceled || filePaths.length === 0) return false;
 
+  // Validate a staged copy first; nothing about the live database changes until it passes.
+  let stagedPath;
+  try {
+    stagedPath = backup.stageRestore(filePaths[0], store.dbPath);
+  } catch (err) {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: 'تعذرت الاستعادة',
+      message: 'لم يتم تغيير أي بيانات. ' + (err instanceof backup.BackupValidationError ? err.message : 'تعذر قراءة الملف المختار.'),
+    });
+    return false;
+  }
+
   const confirmed = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons: ['إلغاء', 'استعادة'],
     defaultId: 0,
     cancelId: 0,
     title: 'تأكيد الاستعادة',
-    message: 'هيتم استبدال كل البيانات الحالية ببيانات النسخة الاحتياطية، وهيقفل البرنامج ويفتح تاني. متأكد؟',
+    message: 'هيتم استبدال كل البيانات الحالية ببيانات النسخة الاحتياطية، وهيقفل البرنامج ويفتح تاني. متأكد؟\n\nهيتم حفظ نسخة أمان من البيانات الحالية قبل الاستعادة.',
   });
-  if (confirmed.response !== 1) return false;
+  if (confirmed.response !== 1) {
+    backup.discardStaged(stagedPath);
+    return false;
+  }
+
+  let safetyPath;
+  try {
+    safetyPath = await backup.createSafetyBackup(store.db, store.dbPath);
+  } catch {
+    backup.discardStaged(stagedPath);
+    await dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: 'تعذرت الاستعادة',
+      message: 'تعذر حفظ نسخة أمان من البيانات الحالية، لذلك تم إلغاء الاستعادة ولم يتم تغيير أي بيانات.',
+    });
+    return false;
+  }
 
   store.db.close();
-  fs.copyFileSync(filePaths[0], store.dbPath);
-  for (const suffix of ['-wal', '-shm']) {
-    const sidecar = store.dbPath + suffix;
-    if (fs.existsSync(sidecar)) fs.unlinkSync(sidecar);
+  try {
+    backup.swapInStaged(stagedPath, store.dbPath);
+  } catch {
+    // The rename is atomic: on failure the original database file is still in place.
+    backup.discardStaged(stagedPath);
+    dialog.showErrorBox('تعذرت الاستعادة', 'لم يتم تغيير البيانات. نسخة الأمان محفوظة في:\n' + safetyPath + '\nسيتم إعادة تشغيل البرنامج.');
   }
 
   app.relaunch();
@@ -211,7 +257,27 @@ async function exportReportExcel(fromDate, toDate) {
   return filePath;
 }
 
+// Renderer windows may only show the app's own pages: no navigation elsewhere and no pop-ups,
+// so no foreign content ever runs with the preload's window.api.
+app.on('web-contents-created', (_e, contents) => {
+  contents.on('will-navigate', (event, url) => {
+    if (!isAppPageUrl(url)) event.preventDefault();
+  });
+  contents.on('will-redirect', (event, url) => {
+    if (!isAppPageUrl(url)) event.preventDefault();
+  });
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  if (app.isPackaged) {
+    contents.on('devtools-opened', () => contents.closeDevTools());
+  }
+});
+
 app.whenReady().then(() => {
+  if (app.isPackaged && DEBUG_SWITCHES.some((sw) => app.commandLine.hasSwitch(sw))) {
+    app.exit(1);
+    return;
+  }
   store = require('./db.js');
   registerIpcHandlers();
   createMainWindow();
@@ -225,59 +291,115 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// ---------- IPC access control ----------
+// Every handler declares who may call it. The check runs here in the main process,
+// so hiding buttons in the UI is no longer the only thing standing in the way.
+const Access = {
+  PUBLIC: 'public', // login screen
+  PENDING: 'pending', // logged in, possibly still required to change the PIN
+  USER: 'user', // any logged-in user (cashier or admin)
+  ADMIN: 'admin',
+  KITCHEN: 'kitchen', // the kitchen window, or any logged-in user
+};
+
+class AccessDeniedError extends Error {}
+
+function isTrustedSender(event) {
+  return !!event.senderFrame && isAppPageUrl(event.senderFrame.url);
+}
+
+function sessionUser() {
+  if (sessionUserId == null) return null;
+  const user = store.getActiveUser(sessionUserId);
+  if (!user) sessionUserId = null;
+  return user;
+}
+
+function authorize(access, event) {
+  if (!isTrustedSender(event)) throw new AccessDeniedError('طلب غير مصرح به');
+  if (access === Access.PUBLIC) return sessionUser();
+  if (access === Access.KITCHEN && kitchenWindow && event.sender === kitchenWindow.webContents) return sessionUser();
+
+  const user = sessionUser();
+  if (!user) throw new AccessDeniedError('يجب تسجيل الدخول أولاً');
+  if (access === Access.PENDING) return user;
+  if (user.mustChangePin) throw new AccessDeniedError('يجب تغيير الرقم السري أولاً');
+  if (access === Access.ADMIN && user.role !== 'admin') throw new AccessDeniedError('هذه العملية متاحة للمدير فقط');
+  return user;
+}
+
+function handle(channel, access, fn) {
+  ipcMain.handle(channel, (event, ...args) => {
+    const user = authorize(access, event);
+    return fn(user, ...args);
+  });
+}
+
 function registerIpcHandlers() {
-  ipcMain.handle('auth:login', (_e, username, pin) => {
+  handle('auth:login', Access.PUBLIC, (_user, username, pin) => {
     const user = store.verifyLogin(username, pin);
-    if (user) currentUser = user;
+    sessionUserId = user ? user.id : null;
     return user;
   });
-  ipcMain.handle('auth:logout', () => {
-    currentUser = null;
-    if (mainWindow) mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'login.html'));
+  handle('auth:logout', Access.PUBLIC, () => {
+    sessionUserId = null;
+    if (mainWindow) mainWindow.loadFile(path.join(rendererDir, 'login.html'));
   });
-  ipcMain.handle('auth:me', () => currentUser);
+  handle('auth:me', Access.PUBLIC, (user) => user);
+  handle('auth:needsSetup', Access.PUBLIC, () => !store.hasAnyUser());
+  handle('auth:setupAdmin', Access.PUBLIC, (_user, username, pin) => {
+    const user = store.createInitialAdmin(username, pin);
+    sessionUserId = user.id;
+    return user;
+  });
+  handle('auth:changePin', Access.PENDING, (user, currentPin, newPin) => store.changeOwnPin(user.id, currentPin, newPin));
 
-  ipcMain.handle('users:list', () => store.getUsers());
-  ipcMain.handle('users:save', (_e, user) => store.saveUser(user));
-  ipcMain.handle('users:setActive', (_e, id, isActive) => store.setUserActive(id, isActive));
+  handle('users:list', Access.ADMIN, () => store.getUsers());
+  handle('users:save', Access.ADMIN, (_user, user) => store.saveUser(user));
+  handle('users:setActive', Access.ADMIN, (_user, id, isActive) => store.setUserActive(id, isActive));
 
-  ipcMain.handle('categories:list', () => store.getCategories());
-  ipcMain.handle('categories:save', (_e, name, isKitchen) => store.saveCategory(name, isKitchen));
+  handle('categories:list', Access.USER, () => store.getCategories());
+  handle('categories:save', Access.ADMIN, (_user, name, isKitchen) => store.saveCategory(name, isKitchen));
 
-  ipcMain.handle('products:list', () => store.getProducts());
-  ipcMain.handle('products:save', (_e, product) => store.saveProduct(product));
-  ipcMain.handle('products:delete', (_e, id) => store.deleteProduct(id));
+  handle('products:list', Access.USER, () => store.getProducts());
+  handle('products:save', Access.ADMIN, (_user, product) => store.saveProduct(product));
+  handle('products:delete', Access.ADMIN, (_user, id) => store.deleteProduct(id));
 
-  ipcMain.handle('sales:create', (_e, payload) => store.createSale({ ...payload, userId: currentUser?.id }));
-  ipcMain.handle('sales:list', (_e, limit) => store.getSales(limit));
-  ipcMain.handle('sales:items', (_e, saleId) => store.getSaleItems(saleId));
-  ipcMain.handle('sales:full', (_e, saleId) => store.getSaleFull(saleId));
+  handle('sales:create', Access.USER, (user, payload) => store.createSale({ ...payload, userId: user.id }));
+  handle('sales:list', Access.USER, (_user, limit) => store.getSales(limit));
+  handle('sales:items', Access.USER, (_user, saleId) => store.getSaleItems(v.positiveId(saleId, 'الفاتورة')));
+  handle('sales:full', Access.USER, (_user, saleId) => store.getSaleFull(v.positiveId(saleId, 'الفاتورة')));
 
-  ipcMain.handle('returns:create', (_e, payload) => store.createReturn({ ...payload, userId: currentUser?.id }));
-  ipcMain.handle('returns:forSale', (_e, saleId) => store.getReturnsForSale(saleId));
+  handle('returns:create', Access.USER, (user, payload) => store.createReturn({ ...payload, userId: user.id }));
+  handle('returns:forSale', Access.USER, (_user, saleId) => store.getReturnsForSale(v.positiveId(saleId, 'الفاتورة')));
 
-  ipcMain.handle('kitchen:list', () => store.getKitchenOrders());
-  ipcMain.handle('kitchen:updateStatus', (_e, saleId, status) => store.updateKitchenStatus(saleId, status));
-  ipcMain.handle('kitchen:openWindow', () => createKitchenWindow());
+  handle('kitchen:list', Access.KITCHEN, () => store.getKitchenOrders());
+  handle('kitchen:updateStatus', Access.KITCHEN, (_user, saleId, status) => store.updateKitchenStatus(saleId, status));
+  handle('kitchen:openWindow', Access.USER, () => createKitchenWindow());
 
-  ipcMain.handle('reports:summary', (_e, fromDate, toDate) => store.getSalesSummary(fromDate, toDate));
-  ipcMain.handle('reports:detailRows', (_e, fromDate, toDate) => store.getSalesDetailRows(fromDate, toDate));
-  ipcMain.handle('reports:exportPdf', (_e, fromDate, toDate) => exportReportPdf(fromDate, toDate));
-  ipcMain.handle('reports:exportExcel', (_e, fromDate, toDate) => exportReportExcel(fromDate, toDate));
-  ipcMain.handle('reports:dailyClosing', (_e, date) => store.getDailyClosing(date));
+  handle('reports:summary', Access.ADMIN, (_user, fromDate, toDate) =>
+    store.getSalesSummary(v.dateString(fromDate), v.dateString(toDate)));
+  handle('reports:detailRows', Access.ADMIN, (_user, fromDate, toDate) =>
+    store.getSalesDetailRows(v.dateString(fromDate), v.dateString(toDate)));
+  handle('reports:exportPdf', Access.ADMIN, (_user, fromDate, toDate) =>
+    exportReportPdf(v.dateString(fromDate), v.dateString(toDate)));
+  handle('reports:exportExcel', Access.ADMIN, (_user, fromDate, toDate) =>
+    exportReportExcel(v.dateString(fromDate), v.dateString(toDate)));
+  handle('reports:dailyClosing', Access.USER, (_user, date) => store.getDailyClosing(v.dateString(date)));
 
-  ipcMain.handle('settings:get', () => store.getSettings());
-  ipcMain.handle('settings:save', (_e, key, value) => store.saveSetting(key, value));
+  handle('settings:get', Access.USER, () => store.getSettings());
+  handle('settings:save', Access.ADMIN, (_user, key, value) => store.saveSetting(key, value));
 
-  ipcMain.handle('backup:create', () => createBackup());
-  ipcMain.handle('backup:restore', () => restoreBackup());
-  ipcMain.handle('backup:currentPath', () => store.dbPath);
+  handle('backup:create', Access.ADMIN, () => createBackup());
+  handle('backup:restore', Access.ADMIN, () => restoreBackup());
+  handle('backup:currentPath', Access.ADMIN, () => store.dbPath);
 
-  ipcMain.handle('print:receipt', (_e, saleId) => printReceipt(saleId));
-  ipcMain.handle('print:dayClose', (_e, date) => printDayClose(date));
-  ipcMain.handle('print:qr', (_e, text) => QRCode.toDataURL(text, { margin: 0, width: 140 }));
+  handle('print:receipt', Access.USER, (_user, saleId) => printReceipt(v.positiveId(saleId, 'الفاتورة')));
+  handle('print:dayClose', Access.USER, (_user, date) => printDayClose(v.dateString(date)));
+  handle('print:qr', Access.USER, (_user, text) =>
+    QRCode.toDataURL(v.requiredText(text, 'النص', 500), { margin: 0, width: 140 }));
 
-  ipcMain.handle('nav:goToApp', () => {
-    if (mainWindow) mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  handle('nav:goToApp', Access.USER, () => {
+    if (mainWindow) mainWindow.loadFile(path.join(rendererDir, 'index.html'));
   });
 }

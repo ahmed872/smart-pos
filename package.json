@@ -9,7 +9,8 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win nsis",
-    "dist:dir": "electron-builder --win dir"
+    "dist:dir": "electron-builder --win dir",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
@@ -17,6 +18,7 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@electron/fuses": "^1.8.0",
     "electron": "^31.3.1",
     "electron-builder": "^24.13.3"
   },
@@ -32,6 +34,7 @@
       "renderer/**/*",
       "package.json"
     ],
+    "afterPack": "scripts/after-pack-fuses.js",
     "win": {
       "icon": "build/icon.ico",
       "target": [

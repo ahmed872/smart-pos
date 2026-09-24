@@ -1,8 +1,11 @@
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { app } = require('electron');
 const Database = require('better-sqlite3');
 const DEFAULT_LOGO_DATA_URL = require('./default-logo.js');
+const { hashPin, verifyPin, burnVerify, isDisclosedDefaultPin, pinPolicyError } = require('./auth.js');
+const v = require('./validation.js');
 
 const dbDir = path.join(app.getPath('appData'), 'SystemDB');
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
@@ -122,6 +125,33 @@ if (!productCols.includes('image_data_url')) {
   db.exec('ALTER TABLE products ADD COLUMN image_data_url TEXT');
 }
 
+// Migration: PINs used to be stored and compared in plaintext. Each legacy PIN is
+// hashed into pin_hash and the plaintext column is overwritten with random bytes
+// (the column is NOT NULL, and an older build must never match an empty value).
+// Accounts still on a publicly disclosed default PIN must choose a new one at next login.
+const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+if (!userCols.includes('pin_hash')) {
+  db.exec('ALTER TABLE users ADD COLUMN pin_hash TEXT');
+}
+if (!userCols.includes('must_change_pin')) {
+  db.exec('ALTER TABLE users ADD COLUMN must_change_pin INTEGER NOT NULL DEFAULT 0');
+}
+function unusableLegacyPin() {
+  return '!' + crypto.randomBytes(32).toString('hex');
+}
+const legacyUsers = db.prepare('SELECT id, pin FROM users WHERE pin_hash IS NULL').all();
+if (legacyUsers.length > 0) {
+  const migrateUser = db.prepare('UPDATE users SET pin_hash = ?, pin = ?, must_change_pin = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const u of legacyUsers) {
+      const legacyPin = u.pin == null ? '' : String(u.pin);
+      // An empty legacy PIN cannot be verified, so it gets an unusable hash; an admin can reset it.
+      const pinHash = legacyPin === '' ? hashPin(unusableLegacyPin()) : hashPin(legacyPin);
+      migrateUser.run(pinHash, unusableLegacyPin(), isDisclosedDefaultPin(legacyPin) ? 1 : 0, u.id);
+    }
+  })();
+}
+
 function seedIfEmpty() {
   const productCount = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
   if (productCount === 0) {
@@ -149,13 +179,8 @@ function seedIfEmpty() {
     insertSetting.run('receipt_width_mm', '58');
     insertSetting.run('logo_data_url', DEFAULT_LOGO_DATA_URL);
   }
-
-  const userCount = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
-  if (userCount === 0) {
-    const insertUser = db.prepare('INSERT INTO users (username, pin, role) VALUES (?, ?, ?)');
-    insertUser.run('admin', '00102026', 'admin');
-    insertUser.run('cashier', '1111', 'cashier');
-  }
+  // No default users are created: on a fresh install the first admin account is
+  // created from the login screen (see createInitialAdmin).
 }
 seedIfEmpty();
 
@@ -180,8 +205,27 @@ const hasLogo = db.prepare("SELECT 1 FROM settings WHERE key = 'logo_data_url'")
 if (!hasLogo) {
   db.prepare("INSERT INTO settings (key, value) VALUES ('logo_data_url', ?)").run(DEFAULT_LOGO_DATA_URL);
 }
-// One-time migration: installs still on the original default admin PIN get the new one.
-db.prepare("UPDATE users SET pin = '00102026' WHERE username = 'admin' AND pin = '1234'").run();
+
+function publicUser(user) {
+  return { id: user.id, username: user.username, role: user.role, mustChangePin: !!user.must_change_pin };
+}
+
+function assertAnotherActiveAdmin(exceptUserId) {
+  const others = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND is_active = 1 AND id != ?")
+    .get(exceptUserId).c;
+  if (others === 0) throw new v.ValidationError('لا يمكن إيقاف أو تغيير صلاحية آخر مدير مفعل في النظام');
+}
+
+// Only these settings exist; each value is validated and normalized before it is stored.
+const SETTING_VALIDATORS = {
+  store_name: (value) => v.optionalText(value, 'اسم المتجر', 200) || '',
+  currency: (value) => v.optionalText(value, 'رمز العملة', 20) || '',
+  tax_percent: (value) => String(v.numberInRange(value, 'نسبة الضريبة', 0, 100)),
+  receipt_width_mm: (value) => String(v.numberInRange(value, 'عرض الفاتورة', 30, 120)),
+  invoice_reset_period: (value) => v.oneOf(value, 'تصفير ترقيم الفواتير', ['monthly', 'weekly', 'never']),
+  low_stock_threshold: (value) => String(v.nonNegativeNumber(value, 'حد تنبيه المخزون')),
+  logo_data_url: (value) => v.optionalImageDataUrl(value, 'الشعار') || '',
+};
 
 function isoWeekKey(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -213,9 +257,53 @@ module.exports = {
 
   // ---------- Auth & users ----------
   verifyLogin(username, pin) {
-    const user = db.prepare('SELECT * FROM users WHERE username = ? AND pin = ? AND is_active = 1').get(username, pin);
-    if (!user) return null;
-    return { id: user.id, username: user.username, role: user.role };
+    if (typeof username !== 'string' || typeof pin !== 'string') return null;
+    const user = db.prepare('SELECT * FROM users WHERE username = ? AND is_active = 1').get(username.trim());
+    if (!user) {
+      burnVerify(pin);
+      return null;
+    }
+    if (!verifyPin(pin, user.pin_hash)) return null;
+    return publicUser(user);
+  },
+
+  // Re-reads the user on every privileged request so deactivation or a role change
+  // takes effect immediately, even for an already logged-in session.
+  getActiveUser(id) {
+    const user = db.prepare('SELECT * FROM users WHERE id = ? AND is_active = 1').get(id);
+    return user ? publicUser(user) : null;
+  },
+
+  hasAnyUser() {
+    return db.prepare('SELECT COUNT(*) AS c FROM users').get().c > 0;
+  },
+
+  // First-run setup: only possible while the users table is completely empty.
+  createInitialAdmin(username, pin) {
+    const name = v.requiredText(username, 'اسم المستخدم', 50);
+    const policyError = pinPolicyError(pin);
+    if (policyError) throw new v.ValidationError(policyError);
+    const pinHash = hashPin(pin);
+    return db.transaction(() => {
+      if (db.prepare('SELECT COUNT(*) AS c FROM users').get().c > 0) {
+        throw new v.ValidationError('تم إعداد حساب المدير بالفعل');
+      }
+      const id = db.prepare("INSERT INTO users (username, pin, pin_hash, role) VALUES (?, ?, ?, 'admin')")
+        .run(name, unusableLegacyPin(), pinHash).lastInsertRowid;
+      return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id));
+    })();
+  },
+
+  changeOwnPin(userId, currentPin, newPin) {
+    const user = db.prepare('SELECT * FROM users WHERE id = ? AND is_active = 1').get(userId);
+    if (!user || !verifyPin(typeof currentPin === 'string' ? currentPin : '', user.pin_hash)) {
+      throw new v.ValidationError('الرقم السري الحالي غير صحيح');
+    }
+    const policyError = pinPolicyError(newPin);
+    if (policyError) throw new v.ValidationError(policyError);
+    if (verifyPin(newPin, user.pin_hash)) throw new v.ValidationError('الرقم السري الجديد لازم يختلف عن الحالي');
+    db.prepare('UPDATE users SET pin_hash = ?, must_change_pin = 0 WHERE id = ?').run(hashPin(newPin), userId);
+    return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(userId));
   },
 
   getUsers() {
@@ -223,23 +311,45 @@ module.exports = {
   },
 
   saveUser(user) {
-    if (user.id) {
-      if (user.pin) {
-        db.prepare('UPDATE users SET username=?, pin=?, role=? WHERE id=?')
-          .run(user.username, user.pin, user.role, user.id);
-      } else {
-        db.prepare('UPDATE users SET username=?, role=? WHERE id=?')
-          .run(user.username, user.role, user.id);
-      }
-      return user.id;
+    if (!user || typeof user !== 'object') throw new v.ValidationError('بيانات المستخدم غير صالحة');
+    const username = v.requiredText(user.username, 'اسم المستخدم', 50);
+    const role = v.oneOf(user.role || 'cashier', 'الصلاحية', ['admin', 'cashier']);
+    const hasPin = user.pin !== undefined && user.pin !== null && user.pin !== '';
+    if (hasPin) {
+      const policyError = pinPolicyError(user.pin);
+      if (policyError) throw new v.ValidationError(policyError);
     }
-    const info = db.prepare('INSERT INTO users (username, pin, role) VALUES (?, ?, ?)')
-      .run(user.username, user.pin, user.role || 'cashier');
+    const pinHash = hasPin ? hashPin(user.pin) : null;
+
+    if (user.id) {
+      const id = v.positiveId(user.id, 'المستخدم');
+      return db.transaction(() => {
+        const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+        if (!existing) throw new v.ValidationError('المستخدم غير موجود');
+        if (existing.role === 'admin' && existing.is_active && role !== 'admin') assertAnotherActiveAdmin(id);
+        if (pinHash) {
+          db.prepare('UPDATE users SET username=?, pin_hash=?, must_change_pin=0, role=? WHERE id=?')
+            .run(username, pinHash, role, id);
+        } else {
+          db.prepare('UPDATE users SET username=?, role=? WHERE id=?').run(username, role, id);
+        }
+        return id;
+      })();
+    }
+    if (!pinHash) throw new v.ValidationError('الرقم السري مطلوب');
+    const info = db.prepare('INSERT INTO users (username, pin, pin_hash, role) VALUES (?, ?, ?, ?)')
+      .run(username, unusableLegacyPin(), pinHash, role);
     return info.lastInsertRowid;
   },
 
   setUserActive(id, isActive) {
-    db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(isActive ? 1 : 0, id);
+    const userId = v.positiveId(id, 'المستخدم');
+    db.transaction(() => {
+      const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+      if (!existing) throw new v.ValidationError('المستخدم غير موجود');
+      if (!isActive && existing.role === 'admin' && existing.is_active) assertAnotherActiveAdmin(userId);
+      db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(isActive ? 1 : 0, userId);
+    })();
   },
 
   // ---------- Categories & products ----------
@@ -258,40 +368,88 @@ module.exports = {
   },
 
   saveProduct(product) {
+    if (!product || typeof product !== 'object') throw new v.ValidationError('بيانات المنتج غير صالحة');
+    const p = {
+      name: v.requiredText(product.name, 'اسم المنتج'),
+      barcode: v.optionalText(product.barcode, 'الباركود', 100),
+      categoryId: v.optionalId(product.category_id, 'الفئة'),
+      price: v.nonNegativeNumber(product.price, 'السعر'),
+      cost: v.nonNegativeNumber(product.cost ?? 0, 'التكلفة'),
+      stockQty: v.nonNegativeNumber(product.stock_qty ?? 0, 'الكمية بالمخزون'),
+      trackStock: product.track_stock ? 1 : 0,
+      image: v.optionalImageDataUrl(product.image_data_url, 'صورة المنتج'),
+    };
+    if (p.categoryId && !db.prepare('SELECT 1 FROM categories WHERE id = ?').get(p.categoryId)) {
+      throw new v.ValidationError('الفئة غير موجودة');
+    }
     if (product.id) {
-      db.prepare(`
+      const id = v.positiveId(product.id, 'المنتج');
+      const info = db.prepare(`
         UPDATE products SET name=?, barcode=?, category_id=?, price=?, cost=?, stock_qty=?, track_stock=?, image_data_url=?
         WHERE id=?
-      `).run(product.name, product.barcode || null, product.category_id || null,
-        product.price, product.cost || 0, product.stock_qty || 0, product.track_stock ? 1 : 0,
-        product.image_data_url || null, product.id);
-      return product.id;
+      `).run(p.name, p.barcode, p.categoryId, p.price, p.cost, p.stockQty, p.trackStock, p.image, id);
+      if (info.changes === 0) throw new v.ValidationError('المنتج غير موجود');
+      return id;
     }
     const info = db.prepare(`
       INSERT INTO products (name, barcode, category_id, price, cost, stock_qty, track_stock, image_data_url)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(product.name, product.barcode || null, product.category_id || null,
-      product.price, product.cost || 0, product.stock_qty || 0, product.track_stock ? 1 : 0,
-      product.image_data_url || null);
+    `).run(p.name, p.barcode, p.categoryId, p.price, p.cost, p.stockQty, p.trackStock, p.image);
     return info.lastInsertRowid;
   },
 
   deleteProduct(id) {
-    db.prepare('UPDATE products SET is_active = 0 WHERE id = ?').run(id);
+    db.prepare('UPDATE products SET is_active = 0 WHERE id = ?').run(v.positiveId(id, 'المنتج'));
   },
 
   saveCategory(name, isKitchen) {
-    const info = db.prepare('INSERT INTO categories (name, is_kitchen) VALUES (?, ?)').run(name, isKitchen ? 1 : 0);
+    const info = db.prepare('INSERT INTO categories (name, is_kitchen) VALUES (?, ?)')
+      .run(v.requiredText(name, 'اسم الفئة', 100), isKitchen ? 1 : 0);
     return info.lastInsertRowid;
   },
 
   // ---------- Sales ----------
+  // Prices, names, kitchen flags and the tax rate come from the database, never from the
+  // renderer; the renderer only chooses which products, how many, the discount and payment method.
   createSale(payload) {
-    const { items, discount = 0, taxPercent = 0, paymentMethod = 'cash', customerId = null, userId = null } = payload;
+    if (!payload || typeof payload !== 'object') throw new v.ValidationError('بيانات الفاتورة غير صالحة');
+    const { userId = null } = payload;
+    if (!Array.isArray(payload.items) || payload.items.length === 0) throw new v.ValidationError('الفاتورة فارغة');
+    if (payload.items.length > 1000) throw new v.ValidationError('عدد الأصناف كبير جدًا');
+    const paymentMethod = v.oneOf(payload.paymentMethod ?? 'cash', 'طريقة الدفع', ['cash', 'card']);
+    const discount = v.nonNegativeNumber(payload.discount ?? 0, 'الخصم');
+    // Same interpretation as the POS screen: a blank/non-numeric stored rate means 0%.
+    const taxPercent = Number(this.getSettings().tax_percent) || 0;
+    if (taxPercent < 0 || taxPercent > 100) {
+      throw new v.ValidationError('نسبة الضريبة المحفوظة في الإعدادات غير صالحة، يرجى تصحيحها من شاشة الإعدادات');
+    }
+
+    const getProductForSale = db.prepare(`
+      SELECT p.id, p.name, p.price, p.is_active, c.is_kitchen AS category_is_kitchen
+      FROM products p LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.id = ?
+    `);
+    const items = payload.items.map((raw) => {
+      if (!raw || typeof raw !== 'object') throw new v.ValidationError('صنف غير صالح في الفاتورة');
+      const productId = v.positiveId(raw.product_id, 'المنتج');
+      const qty = v.positiveNumber(raw.qty, 'الكمية');
+      const product = getProductForSale.get(productId);
+      if (!product || !product.is_active) throw new v.ValidationError('منتج غير موجود في الفاتورة');
+      return {
+        product_id: product.id,
+        name: product.name,
+        qty,
+        unit_price: product.price,
+        is_kitchen_item: product.category_is_kitchen ? 1 : 0,
+      };
+    });
+
     const subtotal = items.reduce((sum, it) => sum + it.qty * it.unit_price, 0);
-    const taxable = Math.max(subtotal - discount, 0);
+    if (discount > subtotal) throw new v.ValidationError('الخصم لا يمكن أن يكون أكبر من إجمالي الفاتورة');
+    const taxable = subtotal - discount;
     const tax = taxable * (taxPercent / 100);
     const total = taxable + tax;
+    const customerId = null;
     const hasKitchenItems = items.some((it) => it.is_kitchen_item);
 
     const getProductCost = db.prepare('SELECT cost FROM products WHERE id = ?');
@@ -343,7 +501,7 @@ module.exports = {
   },
 
   getSales(limit = 100) {
-    return db.prepare('SELECT * FROM sales ORDER BY id DESC LIMIT ?').all(limit);
+    return db.prepare('SELECT * FROM sales ORDER BY id DESC LIMIT ?').all(v.numberInRange(limit ?? 100, 'العدد', 1, 10000));
   },
 
   getSaleItems(saleId) {
@@ -386,9 +544,18 @@ module.exports = {
   },
 
   // ---------- Returns ----------
-  createReturn({ saleId, saleItemId, qty, reason, userId }) {
+  createReturn(payload) {
+    if (!payload || typeof payload !== 'object') throw new v.ValidationError('بيانات الإرجاع غير صالحة');
+    const saleItemId = v.positiveId(payload.saleItemId, 'صنف الفاتورة');
+    const qty = v.positiveNumber(payload.qty, 'الكمية المطلوب إرجاعها');
+    const reason = v.optionalText(payload.reason, 'سبب الإرجاع', 500);
+    const { userId } = payload;
     const item = db.prepare('SELECT * FROM sale_items WHERE id = ?').get(saleItemId);
     if (!item) throw new Error('صنف الفاتورة غير موجود');
+    if (payload.saleId !== undefined && v.positiveId(payload.saleId, 'الفاتورة') !== item.sale_id) {
+      throw new v.ValidationError('صنف الفاتورة لا يتبع هذه الفاتورة');
+    }
+    const saleId = item.sale_id;
 
     const alreadyReturned = db.prepare(
       'SELECT COALESCE(SUM(qty), 0) AS q FROM returns WHERE sale_item_id = ?'
@@ -443,7 +610,8 @@ module.exports = {
   },
 
   updateKitchenStatus(saleId, status) {
-    db.prepare('UPDATE sales SET kitchen_status = ? WHERE id = ?').run(status, saleId);
+    db.prepare("UPDATE sales SET kitchen_status = ? WHERE id = ? AND kitchen_status != 'none'")
+      .run(v.oneOf(status, 'حالة الطلب', ['pending', 'preparing', 'ready']), v.positiveId(saleId, 'الفاتورة'));
   },
 
   // ---------- Reports ----------
@@ -541,7 +709,10 @@ module.exports = {
   },
 
   saveSetting(key, value) {
-    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value);
+    const normalize = SETTING_VALIDATORS[key];
+    if (!normalize) throw new v.ValidationError('إعداد غير معروف');
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run(key, normalize(value));
   },
 
   // ---------- Backup ----------

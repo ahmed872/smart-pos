@@ -8,7 +8,7 @@ let pendingProductImage = null;
 
 async function init() {
   currentUser = await window.api.auth.me();
-  if (!currentUser) {
+  if (!currentUser || currentUser.mustChangePin) {
     window.location.href = 'login.html';
     return;
   }
@@ -33,7 +33,7 @@ async function init() {
   setupSettingsHandlers();
   setupReportsHandlers();
   setupUsersHandlers();
-  setupBackupHandlers();
+  if (currentUser.role === 'admin') setupBackupHandlers();
   setupLogoHandlers();
   setupDayCloseHandlers();
 
@@ -376,7 +376,12 @@ async function refreshProductsTable() {
   `).join('');
   body.querySelectorAll('[data-delete]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      await window.api.products.delete(Number(btn.dataset.delete));
+      try {
+        await window.api.products.delete(Number(btn.dataset.delete));
+      } catch (err) {
+        alert(err.message);
+        return;
+      }
       products = await window.api.products.list();
       renderProductGrid();
       updateLowStockBadge();
@@ -448,17 +453,22 @@ function setupProductHandlers() {
   document.getElementById('saveProductBtn').addEventListener('click', async () => {
     const name = document.getElementById('pName').value.trim();
     if (!name) { alert('اسم المنتج مطلوب'); return; }
-    await window.api.products.save({
-      id: editingProductId,
-      name,
-      barcode: document.getElementById('pBarcode').value.trim(),
-      category_id: Number(document.getElementById('pCategory').value) || null,
-      price: Number(document.getElementById('pPrice').value) || 0,
-      cost: Number(document.getElementById('pCost').value) || 0,
-      stock_qty: Number(document.getElementById('pStock').value) || 0,
-      track_stock: document.getElementById('pTrackStock').checked,
-      image_data_url: pendingProductImage,
-    });
+    try {
+      await window.api.products.save({
+        id: editingProductId,
+        name,
+        barcode: document.getElementById('pBarcode').value.trim(),
+        category_id: Number(document.getElementById('pCategory').value) || null,
+        price: Number(document.getElementById('pPrice').value) || 0,
+        cost: Number(document.getElementById('pCost').value) || 0,
+        stock_qty: Number(document.getElementById('pStock').value) || 0,
+        track_stock: document.getElementById('pTrackStock').checked,
+        image_data_url: pendingProductImage,
+      });
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
     resetProductForm();
     products = await window.api.products.list();
     renderProductGrid();
@@ -485,13 +495,19 @@ function populateSettingsForm() {
 
 function setupSettingsHandlers() {
   document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
-    await window.api.settings.save('store_name', document.getElementById('sStoreName').value);
-    await window.api.settings.save('currency', document.getElementById('sCurrency').value);
-    await window.api.settings.save('tax_percent', document.getElementById('sTax').value);
-    await window.api.settings.save('receipt_width_mm', document.getElementById('sReceiptWidth').value);
-    await window.api.settings.save('invoice_reset_period', document.getElementById('sInvoiceReset').value);
-    await window.api.settings.save('low_stock_threshold', document.getElementById('sLowStock').value);
-    settings = await window.api.settings.get();
+    try {
+      await window.api.settings.save('store_name', document.getElementById('sStoreName').value);
+      await window.api.settings.save('currency', document.getElementById('sCurrency').value);
+      await window.api.settings.save('tax_percent', document.getElementById('sTax').value);
+      await window.api.settings.save('receipt_width_mm', document.getElementById('sReceiptWidth').value);
+      await window.api.settings.save('invoice_reset_period', document.getElementById('sInvoiceReset').value);
+      await window.api.settings.save('low_stock_threshold', document.getElementById('sLowStock').value);
+    } catch (err) {
+      alert(err.message);
+      return;
+    } finally {
+      settings = await window.api.settings.get();
+    }
     renderProductGrid();
     renderSidebarBrand();
     updateLowStockBadge();
@@ -501,7 +517,12 @@ function setupSettingsHandlers() {
   document.getElementById('addCategoryBtn').addEventListener('click', async () => {
     const name = document.getElementById('catName').value.trim();
     if (!name) return;
-    await window.api.categories.save(name, document.getElementById('catIsKitchen').checked);
+    try {
+      await window.api.categories.save(name, document.getElementById('catIsKitchen').checked);
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
     categories = await window.api.categories.list();
     renderCategorySelect();
     document.getElementById('catName').value = '';
@@ -555,8 +576,11 @@ function setupReportsHandlers() {
   });
 }
 
+let usersList = [];
+
 async function refreshUsersTable() {
   const users = await window.api.users.list();
+  usersList = users;
   const body = document.getElementById('usersTableBody');
   body.innerHTML = users.map((u) => `
     <tr>
@@ -575,7 +599,11 @@ async function refreshUsersTable() {
     btn.addEventListener('click', async () => {
       const id = Number(btn.dataset.toggleUser);
       const isActive = btn.dataset.active === '1';
-      await window.api.users.setActive(id, !isActive);
+      try {
+        await window.api.users.setActive(id, !isActive);
+      } catch (err) {
+        alert(err.message);
+      }
       await refreshUsersTable();
     });
   });
@@ -587,7 +615,14 @@ function setupUsersHandlers() {
     const pin = document.getElementById('uPin').value.trim();
     const role = document.getElementById('uRole').value;
     if (!username || !pin) { alert('اسم المستخدم والرقم السري مطلوبان'); return; }
-    await window.api.users.save({ username, pin, role });
+    // Saving an existing username updates that user's PIN and role.
+    const existing = usersList.find((u) => u.username === username);
+    try {
+      await window.api.users.save({ id: existing ? existing.id : undefined, username, pin, role });
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
     document.getElementById('uUsername').value = '';
     document.getElementById('uPin').value = '';
     await refreshUsersTable();
@@ -627,7 +662,12 @@ function setupLogoHandlers() {
 
   document.getElementById('saveLogoBtn').addEventListener('click', async () => {
     if (!pendingDataUrl) { alert('اختر صورة الشعار أولاً'); return; }
-    await window.api.settings.save('logo_data_url', pendingDataUrl);
+    try {
+      await window.api.settings.save('logo_data_url', pendingDataUrl);
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
     settings = await window.api.settings.get();
     renderSidebarBrand();
     alert('تم حفظ الشعار');
