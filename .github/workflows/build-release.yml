@@ -45,6 +45,15 @@ jobs:
             echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+      # The installer's version comes from package.json; refuse to publish it under another tag.
+      - name: Check tag matches package version
+        shell: bash
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "${{ steps.tag.outputs.name }}" ]; then
+            echo "tag ${{ steps.tag.outputs.name }} does not match package.json version $pkg"; exit 1
+          fi
+
       # Release notes are taken from release-notes/<tag>.md when that file exists.
       - name: Find release notes
         id: notes
@@ -57,6 +66,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
+          # A tag created by this release points at exactly the commit that was built and tested.
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.tag.outputs.name }}
           body_path: ${{ steps.notes.outputs.path }}
           files: dist/*.exe

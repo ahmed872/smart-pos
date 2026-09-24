@@ -1,0 +1,82 @@
+name: Verify Published Release
+
+# Tests the installer exactly as published on a GitHub Release (not a local rebuild): its digest,
+# version and fuses, then the same install / first-run / functional / hardening / uninstall and
+# reinstall checks used for every build, against the installed app's own app.asar.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.2.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-release-artifact:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Test tooling only (dev Electron runs the published app.asar in the functional test).
+      - name: Install dependencies (lockfile only)
+        run: npm ci
+
+      - name: Download the published installer and check its digest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ inputs.tag }}'
+          $rel = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
+          $asset = $rel.assets | Where-Object { $_.name -like '*Setup*.exe' } | Select-Object -First 1
+          if (-not $asset) { throw "no installer asset on release $tag" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Invoke-WebRequest $asset.browser_download_url -OutFile "dist\$($asset.name)"
+          $sha = (Get-FileHash "dist\$($asset.name)" -Algorithm SHA256).Hash.ToLower()
+          Write-Host "asset $($asset.name) sha256 $sha (release digest: $($asset.digest))"
+          if ($asset.digest -and $asset.digest -ne "sha256:$sha") { throw 'downloaded installer does not match the release digest' }
+          $version = (node -p "require('./package.json').version")
+          if ($asset.name -notlike "*$version.exe") { throw "asset $($asset.name) is not version $version" }
+
+      - name: Published installer - install and first run
+        shell: pwsh
+        run: ./scripts/ci/windows-packaged-smoke.ps1 -Phase FirstRun
+
+      - name: Installed app - version and fuses
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Cashier System.exe' | Select-Object -First 1
+          $ver = $exe.VersionInfo.ProductVersion
+          Write-Host "installed $($exe.FullName) version $ver"
+          if ($ver -ne (node -p "require('./package.json').version")) { throw "installed version $ver does not match ${{ inputs.tag }}" }
+          $out = npx @electron/fuses read --app $exe.FullName | Out-String
+          Write-Host $out
+          foreach ($line in @('RunAsNode is Disabled', 'EnableNodeOptionsEnvironmentVariable is Disabled',
+                              'EnableNodeCliInspectArguments is Disabled', 'OnlyLoadAppFromAsar is Enabled')) {
+            if ($out -notmatch [regex]::Escape($line)) { throw "fuse check failed: $line" }
+          }
+          "INSTALLED_ASAR=$(Join-Path $exe.DirectoryName 'resources\app.asar')" >> $env:GITHUB_ENV
+
+      - name: Install Playwright (test tool only)
+        shell: pwsh
+        run: npm install --no-save --prefix "$env:RUNNER_TEMP\pw" playwright-core@1.56.1
+
+      - name: Functional end-to-end test on the installed app.asar
+        shell: pwsh
+        run: |
+          $env:PLAYWRIGHT_CORE = "$env:RUNNER_TEMP\pw\node_modules\playwright-core"
+          $env:E2E_APP_DIR = $env:INSTALLED_ASAR
+          node scripts/ci/e2e-functional.js
+
+      - name: Published installer - existing data, hardening, uninstall and reinstall
+        shell: pwsh
+        run: ./scripts/ci/windows-packaged-smoke.ps1 -Phase Existing
