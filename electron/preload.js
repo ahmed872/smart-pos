@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('api', {
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
     save: (key, value) => ipcRenderer.invoke('settings:save', key, value),
+    saveMany: (values) => ipcRenderer.invoke('settings:saveMany', values),
   },
   backup: {
     create: () => ipcRenderer.invoke('backup:create'),

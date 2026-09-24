@@ -1,8 +1,4 @@
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
+const SI = window.StoreIdentity;
 
 function applyPageWidth(widthMm) {
   const style = document.createElement('style');
@@ -26,15 +22,12 @@ async function render() {
   const widthMm = Number(settings.receipt_width_mm) || 58;
   applyPageWidth(widthMm);
 
-  const header = settings.logo_data_url
-    ? `<div class="logo-box"><img src="${settings.logo_data_url}" /></div>`
-    : `<h2>${escapeHtml(settings.store_name || '')}</h2>`;
 
   const container = document.getElementById('report');
   container.innerHTML = `
-    ${header}
+    ${SI.headerHtml(settings, { compact: true, logoMaxHeight: 50 })}
     <p class="center">تقرير إغلاق اليوم</p>
-    <p class="center">${escapeHtml(closing.date)}</p>
+    <p class="center">${SI.formatDate(closing.date)}</p>
     <hr />
     <table>
       <tr><td>عدد الفواتير</td><td style="text-align:left;">${closing.invoiceCount}</td></tr>

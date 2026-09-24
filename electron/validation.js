@@ -63,6 +63,29 @@ function optionalText(value, label, maxLength = 200) {
   return text === '' ? null : text;
 }
 
+// Text printed on receipts/reports: one line, no control characters and no bidi override/isolate
+// characters (they can reorder or hide the surrounding printed text). HTML is escaped at render.
+const DISALLOWED_DISPLAY_CHARS = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
+
+function displayText(value, label, maxLength) {
+  if (value === null || value === undefined) return '';
+  if (typeof value !== 'string') fail(`${label}: غير صالح`);
+  const text = value.trim();
+  if (text.length > maxLength) fail(`${label}: يجب ألا يزيد عن ${maxLength} حرفًا`);
+  if (DISALLOWED_DISPLAY_CHARS.test(text)) fail(`${label}: يحتوي على رموز غير مسموحة`);
+  return text;
+}
+
+// Phone numbers and registration numbers: digits (Latin or Arabic-Indic), Latin letters and a few
+// separators only.
+function identifierText(value, label, maxLength, pattern) {
+  const text = displayText(value, label, maxLength);
+  if (text !== '' && !pattern.test(text)) fail(`${label}: يحتوي على رموز غير مسموحة`);
+  return text;
+}
+const PHONE_RE = /^[0-9\u0660-\u0669+\-() /]+$/;
+const REGISTRATION_RE = /^[0-9\u0660-\u0669A-Za-z\-/ .]+$/;
+
 function oneOf(value, label, allowed) {
   if (!allowed.includes(value)) fail(`${label}: قيمة غير مسموحة`);
   return value;
@@ -97,6 +120,10 @@ module.exports = {
   requiredText,
   optionalText,
   oneOf,
+  displayText,
+  identifierText,
+  PHONE_RE,
+  REGISTRATION_RE,
   optionalImageDataUrl,
   dateString,
 };

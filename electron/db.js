@@ -61,6 +61,11 @@ const SETTING_DEFAULTS = {
   invoice_reset_period: 'monthly',
   low_stock_threshold: '5',
   logo_data_url: '',
+  store_address: '',
+  store_phone: '',
+  tax_number: '',
+  commercial_register: '',
+  receipt_footer: 'شكرًا لتعاملكم معنا',
 };
 const insertMissingSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
 for (const [key, value] of Object.entries(SETTING_DEFAULTS)) insertMissingSetting.run(key, value);
@@ -139,8 +144,13 @@ function assertAnotherActiveAdmin(exceptUserId) {
 
 // Only these settings exist; each value is validated and normalized before it is stored.
 const SETTING_VALIDATORS = {
-  store_name: (value) => v.optionalText(value, 'اسم المتجر', 200) || '',
-  currency: (value) => v.optionalText(value, 'رمز العملة', 20) || '',
+  store_name: (value) => v.displayText(value, 'اسم المتجر', 100),
+  currency: (value) => v.displayText(value, 'رمز العملة', 10),
+  store_address: (value) => v.displayText(value, 'العنوان', 200),
+  store_phone: (value) => v.identifierText(value, 'رقم الهاتف', 40, v.PHONE_RE),
+  tax_number: (value) => v.identifierText(value, 'الرقم الضريبي', 50, v.REGISTRATION_RE),
+  commercial_register: (value) => v.identifierText(value, 'السجل التجاري', 50, v.REGISTRATION_RE),
+  receipt_footer: (value) => v.displayText(value, 'رسالة أسفل الفاتورة', 200),
   tax_percent: (value) => String(v.numberInRange(value, 'نسبة الضريبة', 0, 100)),
   receipt_width_mm: (value) => String(v.numberInRange(value, 'عرض الفاتورة', 30, 120)),
   invoice_reset_period: (value) => v.oneOf(value, 'تصفير ترقيم الفواتير', ['monthly', 'weekly', 'never']),
@@ -453,9 +463,14 @@ module.exports = {
       SELECT sale_item_id, SUM(qty) AS returned_qty FROM returns WHERE sale_id = ? GROUP BY sale_item_id
     `).all(saleId);
     const returnedMap = Object.fromEntries(returnedByItem.map((r) => [r.sale_item_id, r.returned_qty]));
+    const refunds = db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(refunded_amount), 0) AS amount, COALESCE(SUM(tax_share), 0) AS tax
+      FROM returns WHERE sale_id = ?
+    `).get(saleId);
     return {
       sale,
       items: items.map((it) => ({ ...it, returned_qty: returnedMap[it.id] || 0 })),
+      refunds,
       settings: this.getSettings(),
     };
   },
@@ -592,10 +607,20 @@ module.exports = {
   },
 
   saveSetting(key, value) {
-    const normalize = SETTING_VALIDATORS[key];
-    if (!normalize) throw new v.ValidationError('إعداد غير معروف');
-    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-      .run(key, normalize(value));
+    this.saveSettings({ [key]: value });
+  },
+
+  // Validates every value first and then saves them in one transaction: either all of them are
+  // stored or none is.
+  saveSettings(values) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) throw new v.ValidationError('بيانات الإعدادات غير صالحة');
+    const entries = Object.entries(values).map(([key, value]) => {
+      const normalize = Object.prototype.hasOwnProperty.call(SETTING_VALIDATORS, key) ? SETTING_VALIDATORS[key] : null;
+      if (!normalize) throw new v.ValidationError('إعداد غير معروف');
+      return [key, normalize(value)];
+    });
+    const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+    db.transaction(() => { for (const [key, value] of entries) upsert.run(key, value); })();
   },
 
   // ---------- Backup ----------

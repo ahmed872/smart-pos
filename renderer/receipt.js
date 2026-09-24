@@ -1,8 +1,4 @@
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
+const SI = window.StoreIdentity;
 
 function applyPageWidth(widthMm) {
   const style = document.createElement('style');
@@ -24,44 +20,49 @@ async function render() {
     return;
   }
 
-  const { sale, items, settings } = data;
+  const { sale, items, refunds, settings } = data;
   const currency = settings.currency || '';
-  const widthMm = Number(settings.receipt_width_mm) || 58;
-  applyPageWidth(widthMm);
+  const money = (n) => SI.money(n, currency);
+  applyPageWidth(Number(settings.receipt_width_mm) || 58);
 
-  const qrDataUrl = await window.api.print.qr(sale.sale_number);
-
-  const header = settings.logo_data_url
-    ? `<div class="qr-box"><img src="${settings.logo_data_url}" style="width:auto;height:34px;" /></div>`
-    : `<h2>${escapeHtml(settings.store_name || 'المتجر')}</h2>`;
+  const qrDataUrl = await window.api.print.qr(SI.invoiceQrText(sale, settings));
+  // Same model as the reports: the discount actually applied is subtotal - (total - tax).
+  const discount = Math.max(sale.subtotal - (sale.total - sale.tax), 0);
+  const rate = SI.taxRate(sale);
 
   container.innerHTML = `
-    ${header}
-    <p class="center">فاتورة رقم: ${escapeHtml(sale.sale_number)}</p>
-    <p class="center">${escapeHtml(sale.created_at)}</p>
-    <p class="center">الكاشير: ${escapeHtml(sale.cashier_name || '-')}</p>
+    ${SI.headerHtml(settings, { logoMaxHeight: 50 })}
+    <hr />
+    <p class="center">فاتورة رقم: <bdi dir="ltr">${SI.escapeHtml(sale.sale_number)}</bdi></p>
+    <p class="center">التاريخ: ${SI.formatDateTime(sale.created_at)}</p>
+    <p class="center">الكاشير: ${SI.escapeHtml(sale.cashier_name || '-')}</p>
+    <p class="center">طريقة الدفع: ${SI.paymentLabel(sale.payment_method)}</p>
     <hr />
     <table>
       ${items.map((it) => `
         <tr>
-          <td colspan="2">${escapeHtml(it.name)}</td>
+          <td colspan="2">${SI.escapeHtml(it.name)}</td>
         </tr>
         <tr>
-          <td>${it.qty} × ${it.unit_price.toFixed(2)}</td>
+          <td><bdi dir="ltr">${it.qty} × ${it.unit_price.toFixed(2)}</bdi></td>
           <td style="text-align:left;">${it.line_total.toFixed(2)}</td>
         </tr>
       `).join('')}
     </table>
     <hr />
     <table class="totals">
-      <tr><td>الإجمالي الفرعي</td><td style="text-align:left;">${sale.subtotal.toFixed(2)} ${currency}</td></tr>
-      <tr><td>الخصم</td><td style="text-align:left;">${sale.discount.toFixed(2)} ${currency}</td></tr>
-      <tr><td>الضريبة</td><td style="text-align:left;">${sale.tax.toFixed(2)} ${currency}</td></tr>
-      <tr><td>الإجمالي</td><td style="text-align:left;">${sale.total.toFixed(2)} ${currency}</td></tr>
+      <tr><td>الإجمالي الفرعي</td><td style="text-align:left;">${money(sale.subtotal)}</td></tr>
+      <tr><td>الخصم</td><td style="text-align:left;">${money(discount)}</td></tr>
+      <tr><td>الضريبة${rate ? ` (${rate}%)` : ''}</td><td style="text-align:left;">${money(sale.tax)}</td></tr>
+      <tr><td>الإجمالي</td><td style="text-align:left;">${money(sale.total)}</td></tr>
+      ${refunds && refunds.count > 0 ? `
+        <tr><td>المرتجعات</td><td style="text-align:left;">- ${money(refunds.amount)}</td></tr>
+        <tr><td>الصافي بعد المرتجعات</td><td style="text-align:left;">${money(sale.total - refunds.amount)}</td></tr>
+      ` : ''}
     </table>
     <hr />
     <div class="qr-box"><img src="${qrDataUrl}" alt="QR" /></div>
-    <p class="center">شكرًا لتعاملكم معنا</p>
+    ${settings.receipt_footer ? `<p class="center">${SI.escapeHtml(settings.receipt_footer)}</p>` : ''}
   `;
 }
 

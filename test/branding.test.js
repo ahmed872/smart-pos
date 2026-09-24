@@ -31,6 +31,8 @@ test('fresh install: no store identity, logo, currency or demo catalog', async (
   assert.deepEqual(s, {
     store_name: '', currency: '', tax_percent: '0', receipt_width_mm: '58',
     invoice_reset_period: 'monthly', low_stock_threshold: '5', logo_data_url: '',
+    store_address: '', store_phone: '', tax_number: '', commercial_register: '',
+    receipt_footer: 'شكرًا لتعاملكم معنا',
   });
   assert.deepEqual(await ctx.call('products:list'), []);
   assert.deepEqual(await ctx.call('categories:list'), []);
@@ -44,7 +46,7 @@ test('fresh install: no store identity, logo, currency or demo catalog', async (
 test('first-run setup stores the store name and currency with the admin (atomically)', async () => {
   const home = makeTempHome();
   const ctx = await boot({ home });
-  await assert.rejects(ctx.call('auth:setupAdmin', 'owner', PIN, { storeName: 'x'.repeat(201) }), /طويل/);
+  await assert.rejects(ctx.call('auth:setupAdmin', 'owner', PIN, { storeName: 'x'.repeat(101) }), /يزيد عن 100/);
   assert.equal(await ctx.call('auth:needsSetup'), true, 'invalid profile creates no admin');
   await ctx.call('auth:setupAdmin', 'owner', PIN, { storeName: '  متجر النور  ', currency: 'ر.س' });
   const s = await ctx.call('settings:get');

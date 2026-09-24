@@ -81,6 +81,13 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   const CASHIER = { u: 'kasher', p: 'Cash-E2E-552' };
   const backupFile = path.join(work, 'backup.db');
   const STORE = { name: 'متجر الاختبار', currency: 'ر.س' };
+  const PROFILE_FIELDS = {
+    '#sStoreAddress': '12 شارع النصر، الرياض',
+    '#sStorePhone': '+966 11 234 5678',
+    '#sTaxNumber': '300123456700003',
+    '#sCommercialRegister': '1010123456',
+    '#sReceiptFooter': 'نسعد بخدمتكم دائمًا',
+  };
   // 1x1 PNG used as a store logo
   const logoFile = path.join(work, 'logo.png');
   fs.writeFileSync(logoFile, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
@@ -155,10 +162,15 @@ async function stubDialogs(app, { save, open, response = 1 }) {
 
   await win.click('.nav-btn[data-view="settings"]');
   await win.fill('#sTax', '14');
+  for (const [id, value] of Object.entries(PROFILE_FIELDS)) await win.fill(id, value);
   await win.click('#saveSettingsBtn');
   await win.waitForTimeout(500);
   check('admin saves settings via UI (tax 14%)', (await api(win, 'window.api.settings.get()')).value.tax_percent === '14');
   check('negative tax rejected', !(await api(win, "window.api.settings.save('tax_percent','-1')")).ok);
+  const savedProfile = (await api(win, 'window.api.settings.get()')).value;
+  check('store profile saved via settings screen', savedProfile.store_address === PROFILE_FIELDS['#sStoreAddress']
+    && savedProfile.store_phone === PROFILE_FIELDS['#sStorePhone'] && savedProfile.tax_number === PROFILE_FIELDS['#sTaxNumber']
+    && savedProfile.commercial_register === PROFILE_FIELDS['#sCommercialRegister'] && savedProfile.receipt_footer === PROFILE_FIELDS['#sReceiptFooter']);
 
   await stubDialogs(app, { save: backupFile, open: backupFile });
   const created = await api(win, 'window.api.backup.create()');
@@ -220,6 +232,37 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   const inspected = inspectDb();
   check('PINs stored hashed (scrypt), never plaintext', inspected.users.length === 2 && inspected.users.every((u) => u.hashed));
 
+  // ---- printed documents use the same store identity (rendered pages, as printed)
+  const page = (f) => 'file://' + path.join(ROOT, 'renderer', f);
+  const day = sales[0].created_at.slice(0, 10);
+  await win.goto(page(`receipt.html?saleId=${sales[0].id}`));
+  await win.waitForTimeout(800);
+  const receipt = await win.innerText('#receipt');
+  check('receipt: store name, address, phone, tax number, commercial register',
+    [STORE.name, ...Object.values(PROFILE_FIELDS).slice(0, 4)].every((v) => receipt.includes(v)), receipt.split('\n').slice(0, 6).join(' | '));
+  check('receipt: invoice number, date, payment method, tax rate, totals, footer',
+    receipt.includes(sales[0].sale_number) && /\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}/.test(receipt) && receipt.includes('طريقة الدفع: نقدًا')
+    && receipt.includes('الضريبة (14%)') && receipt.includes('28.50 ' + STORE.currency) && receipt.includes(PROFILE_FIELDS['#sReceiptFooter']));
+  check('receipt: returns shown after a return', receipt.includes('المرتجعات') && receipt.includes('الصافي بعد المرتجعات'));
+  check('receipt: QR code rendered', await win.isVisible('.qr-box img'));
+  await win.goto(page(`day-close.html?date=${day}`));
+  await win.waitForTimeout(800);
+  check('daily closing print: store name', (await win.innerText('#report')).includes(STORE.name));
+  await win.goto(page(`report-print.html?from=${day}&to=${day}`));
+  await win.waitForTimeout(800);
+  const reportText = await win.innerText('#report');
+  check('sales report print: store name and consistent labels', reportText.includes(STORE.name) && reportText.includes('الصافي شامل الضريبة'));
+  await win.goto(page('index.html'));
+  await win.waitForLoadState('domcontentloaded');
+  const pdfFile = path.join(work, 'report.pdf');
+  const xlsxFile = path.join(work, 'report.xlsx');
+  await stubDialogs(app, { save: pdfFile, open: backupFile });
+  check('PDF export', (await api(win, `window.api.reports.exportPdf('${day}','${day}')`)).ok
+    && fs.existsSync(pdfFile) && fs.readFileSync(pdfFile).subarray(0, 4).toString() === '%PDF');
+  await stubDialogs(app, { save: xlsxFile, open: backupFile });
+  check('Excel export', (await api(win, `window.api.reports.exportExcel('${day}','${day}')`)).ok
+    && fs.existsSync(xlsxFile) && fs.readFileSync(xlsxFile).subarray(0, 2).toString() === 'PK' && fs.statSync(xlsxFile).size > 1000);
+
   // ---- restore a corrupted file: rejected, app keeps running
   const junk = path.join(work, 'junk.db');
   fs.writeFileSync(junk, crypto.randomBytes(16384));
@@ -243,6 +286,8 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   check('app restarts after restore', (await api(win, `window.api.auth.login('${ADMIN.u}','${ADMIN.p}')`)).value?.role === 'admin');
   products = (await api(win, 'window.api.products.list()')).value.map((p) => p.name);
   check('restored data is the backup data', products.includes('E2E-PRODUCT') && !products.includes('AFTER-BACKUP'));
+  const restoredProfile = (await api(win, 'window.api.settings.get()')).value;
+  check('store identity restored with the backup', restoredProfile.store_name === STORE.name && restoredProfile.tax_number === PROFILE_FIELDS['#sTaxNumber']);
   check('cashier login uses PIN from the backup', !!(await api(win, `window.api.auth.login('${CASHIER.u}','${CASHIER.p}')`)).value);
   await app.close();
 

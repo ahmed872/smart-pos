@@ -1,8 +1,5 @@
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
+const SI = window.StoreIdentity;
+const escapeHtml = SI.escapeHtml;
 
 async function render() {
   const params = new URLSearchParams(window.location.search);
@@ -19,9 +16,8 @@ async function render() {
   const container = document.getElementById('report');
 
   container.innerHTML = `
-    ${settings.logo_data_url ? `<div style="text-align:center;margin-bottom:6px;"><img src="${settings.logo_data_url}" style="max-height:70px;" /></div>` : ''}
-    <h1>${escapeHtml(settings.store_name || '')}</h1>
-    <p class="sub">تقرير المبيعات من ${escapeHtml(from)} إلى ${escapeHtml(to)}</p>
+    ${SI.headerHtml(settings, { compact: true, logoMaxHeight: 70 })}
+    <p class="sub">تقرير المبيعات من ${SI.formatDate(from)} إلى ${SI.formatDate(to)}</p>
 
     <h2>الملخص</h2>
     <table class="summary-table">
@@ -57,7 +53,7 @@ async function render() {
       <tbody>
         ${rows.map((r) => `
           <tr>
-            <td>${escapeHtml(r.created_at)}</td>
+            <td>${SI.formatDateTime(r.created_at)}</td>
             <td>${escapeHtml(r.sale_number)}</td>
             <td>${escapeHtml(r.cashier_name || '-')}</td>
             <td>${escapeHtml(r.product_name)}</td>

@@ -259,7 +259,9 @@ async function exportReportExcel(fromDate, toDate) {
 
   const summarySheet = workbook.addWorksheet('الملخص');
   summarySheet.views = [{ rightToLeft: true }];
+  const settings = store.getSettings();
   summarySheet.addRows([
+    ['المتجر', settings.store_name || ''],
     ['الفترة', `${fromDate} إلى ${toDate}`],
     ['عدد الفواتير', summary.invoiceCount],
     ['إجمالي المبيعات قبل الخصم', summary.grossSales],
@@ -419,6 +421,7 @@ function registerIpcHandlers() {
 
   handle('settings:get', Access.USER, () => store.getSettings());
   handle('settings:save', Access.ADMIN, (_user, key, value) => store.saveSetting(key, value));
+  handle('settings:saveMany', Access.ADMIN, (_user, values) => store.saveSettings(values));
 
   handle('backup:create', Access.ADMIN, () => createBackup());
   handle('backup:restore', Access.ADMIN, () => restoreBackup());

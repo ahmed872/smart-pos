@@ -487,26 +487,34 @@ function setupProductHandlers() {
   document.getElementById('cancelEditBtn').addEventListener('click', resetProductForm);
 }
 
-function populateSettingsForm() {
-  document.getElementById('sStoreName').value = settings.store_name || '';
-  document.getElementById('sCurrency').value = settings.currency || '';
-  document.getElementById('sTax').value = settings.tax_percent || 0;
-  document.getElementById('sReceiptWidth').value = settings.receipt_width_mm || 58;
-  document.getElementById('sInvoiceReset').value = settings.invoice_reset_period || 'monthly';
-  document.getElementById('sLowStock').value = settings.low_stock_threshold || 5;
+// Settings key -> form field of the settings screen.
+const SETTINGS_FORM_FIELDS = [
+  ['store_name', 'sStoreName'],
+  ['store_address', 'sStoreAddress'],
+  ['store_phone', 'sStorePhone'],
+  ['tax_number', 'sTaxNumber'],
+  ['commercial_register', 'sCommercialRegister'],
+  ['receipt_footer', 'sReceiptFooter'],
+  ['currency', 'sCurrency'],
+  ['tax_percent', 'sTax'],
+  ['receipt_width_mm', 'sReceiptWidth'],
+  ['invoice_reset_period', 'sInvoiceReset'],
+  ['low_stock_threshold', 'sLowStock'],
+];
 
+// Every key always exists (the backend inserts defaults), so no defaults are repeated here.
+function populateSettingsForm() {
+  for (const [key, id] of SETTINGS_FORM_FIELDS) document.getElementById(id).value = settings[key] ?? '';
   renderLogoPreview();
 }
 
 function setupSettingsHandlers() {
   document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+    const values = {};
+    for (const [key, id] of SETTINGS_FORM_FIELDS) values[key] = document.getElementById(id).value;
     try {
-      await window.api.settings.save('store_name', document.getElementById('sStoreName').value);
-      await window.api.settings.save('currency', document.getElementById('sCurrency').value);
-      await window.api.settings.save('tax_percent', document.getElementById('sTax').value);
-      await window.api.settings.save('receipt_width_mm', document.getElementById('sReceiptWidth').value);
-      await window.api.settings.save('invoice_reset_period', document.getElementById('sInvoiceReset').value);
-      await window.api.settings.save('low_stock_threshold', document.getElementById('sLowStock').value);
+      // validated and saved together: either every value is stored or none is
+      await window.api.settings.saveMany(values);
     } catch (err) {
       alert(err.message);
       return;
