@@ -1,0 +1,68 @@
+name: Windows Verification
+
+# Builds and verifies the Windows installer on every branch push, without publishing anything.
+# Releases are only produced by build-release.yml.
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (lockfile only)
+        run: npm ci
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Build Windows installer
+        run: npm run dist
+
+      - name: Check Electron fuses on the packaged binary
+        shell: pwsh
+        run: |
+          $out = npx @electron/fuses read --app "dist/win-unpacked/Cashier System.exe" | Out-String
+          Write-Host $out
+          foreach ($line in @('RunAsNode is Disabled', 'EnableNodeOptionsEnvironmentVariable is Disabled',
+                              'EnableNodeCliInspectArguments is Disabled', 'OnlyLoadAppFromAsar is Enabled')) {
+            if ($out -notmatch [regex]::Escape($line)) { throw "fuse check failed: $line" }
+          }
+
+      - name: Upload installer for manual testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/*.exe
+          retention-days: 7
+
+      - name: Packaged app - install and first run
+        shell: pwsh
+        run: ./scripts/ci/windows-packaged-smoke.ps1 -Phase FirstRun
+
+      # Test-only tool, installed outside the project so node_modules stays exactly as in the lockfile.
+      - name: Install Playwright (test tool only)
+        shell: pwsh
+        run: npm install --no-save --prefix "$env:RUNNER_TEMP\pw" playwright-core@1.56.1
+
+      - name: Functional end-to-end test on Windows
+        shell: pwsh
+        run: |
+          $env:PLAYWRIGHT_CORE = "$env:RUNNER_TEMP\pw\node_modules\playwright-core"
+          node scripts/ci/e2e-functional.js
+
+      - name: Packaged app - existing data, hardening, uninstall and reinstall
+        shell: pwsh
+        run: ./scripts/ci/windows-packaged-smoke.ps1 -Phase Existing
