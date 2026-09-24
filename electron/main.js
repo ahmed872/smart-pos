@@ -377,8 +377,8 @@ function registerIpcHandlers() {
   });
   handle('auth:me', Access.PUBLIC, (user) => user);
   handle('auth:needsSetup', Access.PUBLIC, () => !store.hasAnyUser());
-  handle('auth:setupAdmin', Access.PUBLIC, (_user, username, pin) => {
-    const user = store.createInitialAdmin(username, pin);
+  handle('auth:setupAdmin', Access.PUBLIC, (_user, username, pin, profile) => {
+    const user = store.createInitialAdmin(username, pin, profile);
     sessionUserId = user.id;
     return user;
   });

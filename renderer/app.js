@@ -68,11 +68,19 @@ function applyRoleVisibility() {
   }
 }
 
+// The store's own identity: its logo if it has one, otherwise its name (product name as last resort).
 function renderSidebarBrand() {
   const box = document.getElementById('sidebarBrand');
   box.innerHTML = settings.logo_data_url
-    ? `<img src="${settings.logo_data_url}" style="max-width:100%;height:auto;" />`
-    : `<span style="color:var(--accent);font-size:20px;font-weight:bold;">سيستم كاشير</span>`;
+    ? `<img src="${settings.logo_data_url}" style="max-width:100%;height:auto;" alt="${escapeHtml(settings.store_name || '')}" />`
+    : `<span style="color:var(--accent);font-size:20px;font-weight:bold;">${escapeHtml(settings.store_name || 'سيستم كاشير')}</span>`;
+}
+
+function renderLogoPreview() {
+  document.getElementById('logoPreviewBox').innerHTML = settings.logo_data_url
+    ? `<img src="${settings.logo_data_url}" style="max-height:70px;" />`
+    : '<span style="color:var(--text-dim);font-size:13px;">لا يوجد شعار مرفوع حاليًا</span>';
+  document.getElementById('removeLogoBtn').style.display = settings.logo_data_url ? '' : 'none';
 }
 
 function setupNav() {
@@ -487,10 +495,7 @@ function populateSettingsForm() {
   document.getElementById('sInvoiceReset').value = settings.invoice_reset_period || 'monthly';
   document.getElementById('sLowStock').value = settings.low_stock_threshold || 5;
 
-  const logoPreviewBox = document.getElementById('logoPreviewBox');
-  logoPreviewBox.innerHTML = settings.logo_data_url
-    ? `<img src="${settings.logo_data_url}" style="max-height:70px;" />`
-    : '<span style="color:var(--text-dim);font-size:13px;">لا يوجد شعار مرفوع حاليًا</span>';
+  renderLogoPreview();
 }
 
 function setupSettingsHandlers() {
@@ -691,9 +696,28 @@ function setupLogoHandlers() {
       alert(err.message);
       return;
     }
+    pendingDataUrl = null;
+    fileInput.value = '';
     settings = await window.api.settings.get();
     renderSidebarBrand();
+    renderLogoPreview();
     alert('تم حفظ الشعار');
+  });
+
+  document.getElementById('removeLogoBtn').addEventListener('click', async () => {
+    if (!confirm('هل تريد إزالة الشعار؟ سيظهر اسم المتجر بدلًا منه.')) return;
+    try {
+      await window.api.settings.save('logo_data_url', '');
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+    pendingDataUrl = null;
+    fileInput.value = '';
+    settings = await window.api.settings.get();
+    renderSidebarBrand();
+    renderLogoPreview();
+    alert('تمت إزالة الشعار');
   });
 }
 

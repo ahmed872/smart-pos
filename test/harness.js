@@ -105,4 +105,24 @@ function shutdown(ctx) {
   }
 }
 
-module.exports = { boot, shutdown, makeTempHome, clearAppModules, ROOT, setFakeElectron: (e) => { fakeElectron = e; } };
+// The product ships with an empty catalog; tests that need products create this fixture
+// (as an admin) instead: kitchen and non-kitchen categories, tracked and untracked stock.
+async function addTestCatalog(ctx) {
+  const food = await ctx.call('categories:save', 'مأكولات', true);
+  const drinks = await ctx.call('categories:save', 'مشروبات', true);
+  const general = await ctx.call('categories:save', 'عام', false);
+  const items = [
+    ['برجر لحم', '1001', food, 85, 45, 0, false],
+    ['بيتزا مارجريتا', '1002', food, 120, 60, 0, false],
+    ['بطاطس مقلية', '1003', food, 35, 15, 0, false],
+    ['عصير برتقال', '2001', drinks, 25, 10, 40, true],
+    ['مياه معدنية', '2002', drinks, 10, 4, 100, true],
+    ['قهوة تركي', '2003', drinks, 20, 8, 0, false],
+    ['منتج عام', '3001', general, 15, 7, 25, true],
+  ];
+  for (const [name, barcode, category_id, price, cost, stock_qty, track_stock] of items) {
+    await ctx.call('products:save', { name, barcode, category_id, price, cost, stock_qty, track_stock });
+  }
+}
+
+module.exports = { boot, shutdown, makeTempHome, clearAppModules, addTestCatalog, ROOT, setFakeElectron: (e) => { fakeElectron = e; } };

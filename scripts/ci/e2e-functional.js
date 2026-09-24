@@ -80,12 +80,22 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   const ADMIN = { u: 'owner', p: 'Owner-E2E-771' };
   const CASHIER = { u: 'kasher', p: 'Cash-E2E-552' };
   const backupFile = path.join(work, 'backup.db');
+  const STORE = { name: 'متجر الاختبار', currency: 'ر.س' };
+  // 1x1 PNG used as a store logo
+  const logoFile = path.join(work, 'logo.png');
+  fs.writeFileSync(logoFile, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
 
   // ---- first run
   let { app, win, dialogs } = await launch();
   check('first run: setup screen shown (no default accounts)', await win.isVisible('#setupSection'));
   check('first run: disclosed default admin credentials rejected',
     (await api(win, "window.api.auth.login('admin','00102026')")).value === null);
+  const loginText = await win.evaluate(() => document.body.innerText + document.title);
+  check('first run: login screen shows no organization branding', !/المجندين|الإدارة العامة/.test(loginText));
+  await win.click('#setupBtn');
+  check('first run: store name is required', /اسم المتجر مطلوب/.test(await win.textContent('#errorMsg')));
+  await win.fill('#setupStoreName', STORE.name);
+  await win.fill('#setupCurrency', STORE.currency);
   await win.fill('#setupUsername', ADMIN.u);
   await win.fill('#setupPin', ADMIN.p);
   await win.fill('#setupPinConfirm', ADMIN.p);
@@ -93,6 +103,27 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   await win.waitForURL(/index\.html/);
   check('first run: admin created, app opened', true);
   check('database file created', fs.existsSync(dbFile), dbFile);
+  const firstSettings = (await api(win, 'window.api.settings.get()')).value;
+  check('first run: store name and currency saved', firstSettings.store_name === STORE.name && firstSettings.currency === STORE.currency);
+  check('first run: no default logo', firstSettings.logo_data_url === '');
+  check('first run: no demo products or categories',
+    (await api(win, 'window.api.products.list()')).value.length === 0 && (await api(win, 'window.api.categories.list()')).value.length === 0);
+  check('sidebar shows the store name', (await win.textContent('#sidebarBrand')).includes(STORE.name));
+
+  // ---- store logo: upload, then remove
+  await win.click('.nav-btn[data-view="settings"]');
+  await win.setInputFiles('#logoFileInput', logoFile);
+  await win.waitForTimeout(300);
+  await win.click('#saveLogoBtn');
+  await win.waitForTimeout(400);
+  check('logo uploaded and shown in the sidebar',
+    (await api(win, 'window.api.settings.get()')).value.logo_data_url.startsWith('data:image/png') && await win.isVisible('#sidebarBrand img'));
+  await win.evaluate(() => { window.confirm = () => true; });
+  await win.click('#removeLogoBtn');
+  await win.waitForTimeout(400);
+  check('logo removed: sidebar falls back to the store name',
+    (await api(win, 'window.api.settings.get()')).value.logo_data_url === '' && !(await win.isVisible('#sidebarBrand img'))
+    && (await win.textContent('#sidebarBrand')).includes(STORE.name));
 
   // ---- admin: users, products, settings, validation
   await win.click('.nav-btn[data-view="users"]');
@@ -217,6 +248,9 @@ async function stubDialogs(app, { save, open, response = 1 }) {
 
   ({ app, win, dialogs } = await launch());
   check('data persists across a normal restart', !!(await api(win, `window.api.auth.login('${ADMIN.u}','${ADMIN.p}')`)).value);
+  const persisted = (await api(win, 'window.api.settings.get()')).value;
+  check('store identity persists across restart (name, currency, removed logo)',
+    persisted.store_name === STORE.name && persisted.currency === STORE.currency && persisted.logo_data_url === '');
   await api(win, `window.api.products.save({name:'PERSIST-CHECK',price:2})`);
   await app.close();
   const final = inspectDb();

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const Database = require('better-sqlite3');
-const { boot, shutdown, makeTempHome } = require('./harness.js');
+const { boot, shutdown, makeTempHome, addTestCatalog } = require('./harness.js');
 
 const ADMIN_PIN = 'Adm1n-Test-PIN';
 const CASHIER_PIN = 'cash-4821';
@@ -18,6 +18,7 @@ async function freshApp() {
   const ctx = await boot({ home });
   await ctx.call('auth:setupAdmin', 'owner', ADMIN_PIN);
   await ctx.call('users:save', { username: 'cashier1', pin: CASHIER_PIN, role: 'cashier' });
+  await addTestCatalog(ctx);
   await ctx.call('auth:logout');
   return { home, ctx };
 }

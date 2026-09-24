@@ -76,6 +76,9 @@ if ($Phase -eq 'FirstRun') {
   $db = Inspect-Db
   Check 'fresh database has no default accounts (first-run setup required)' (@($db.users).Count -eq 0)
   Check 'fresh database has current schema (pin_hash column)' $db.hasPinHashColumn
+  Check 'fresh database has no demo products or categories' ($db.products -eq 0 -and $db.categories -eq 0) "products=$($db.products) categories=$($db.categories)"
+  Check 'fresh database has no store identity, logo or currency preset' ($db.settings.store_name -eq '' -and $db.settings.logo_data_url -eq '' -and $db.settings.currency -eq '')
+  Check 'fresh database contains no organization name' (-not $db.containsOrganizationName)
   Check 'fresh database integrity ok' ($db.integrity -eq 'ok')
 }
 

@@ -8,8 +8,9 @@
 <body style="display:flex;align-items:center;justify-content:center;height:100vh;">
   <div class="card-box" style="width:380px;">
     <div style="text-align:center;">
-      <img src="assets/login-emblem.png" alt="الشعار" style="width:190px;height:auto;" />
+      <img src="assets/app-icon.png" alt="" style="width:96px;height:96px;" />
     </div>
+    <h2 style="text-align:center;margin:8px 0 0;">سيستم كاشير</h2>
     <p style="text-align:center;color:var(--text-dim);margin-top:4px;">نظام نقطة البيع</p>
     <div id="loginSection">
       <div class="form-row">
@@ -23,7 +24,15 @@
       <button class="primary" id="loginBtn">دخول</button>
     </div>
     <div id="setupSection" style="display:none;">
-      <p style="text-align:center;">أول تشغيل: أنشئ حساب المدير</p>
+      <p style="text-align:center;">أول تشغيل: أدخل بيانات المتجر وأنشئ حساب المدير</p>
+      <div class="form-row">
+        <label>اسم المتجر</label>
+        <input id="setupStoreName" maxlength="200" />
+      </div>
+      <div class="form-row">
+        <label>رمز العملة (اختياري)</label>
+        <input id="setupCurrency" maxlength="20" placeholder="مثال: ر.س أو ج.م أو د.إ" />
+      </div>
       <div class="form-row">
         <label>اسم المستخدم للمدير</label>
         <input id="setupUsername" />

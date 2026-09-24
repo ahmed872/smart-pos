@@ -3,7 +3,6 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { app } = require('electron');
 const Database = require('better-sqlite3');
-const DEFAULT_LOGO_DATA_URL = require('./default-logo.js');
 const { hashPin, verifyPin, burnVerify, isDisclosedDefaultPin, pinPolicyError } = require('./auth.js');
 const v = require('./validation.js');
 const { applySchema } = require('./schema.js');
@@ -50,59 +49,21 @@ if (legacyUsers.length > 0) {
   })();
 }
 
-function seedIfEmpty() {
-  const productCount = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
-  if (productCount === 0) {
-    const insertCategory = db.prepare('INSERT INTO categories (name, is_kitchen) VALUES (?, ?)');
-    const foodCat = insertCategory.run('مأكولات', 1).lastInsertRowid;
-    const drinksCat = insertCategory.run('مشروبات', 1).lastInsertRowid;
-    const generalCat = insertCategory.run('عام', 0).lastInsertRowid;
-
-    const insertProduct = db.prepare(`
-      INSERT INTO products (name, barcode, category_id, price, cost, stock_qty, track_stock)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertProduct.run('برجر لحم', '1001', foodCat, 85, 45, 0, 0);
-    insertProduct.run('بيتزا مارجريتا', '1002', foodCat, 120, 60, 0, 0);
-    insertProduct.run('بطاطس مقلية', '1003', foodCat, 35, 15, 0, 0);
-    insertProduct.run('عصير برتقال', '2001', drinksCat, 25, 10, 40, 1);
-    insertProduct.run('مياه معدنية', '2002', drinksCat, 10, 4, 100, 1);
-    insertProduct.run('قهوة تركي', '2003', drinksCat, 20, 8, 0, 0);
-    insertProduct.run('منتج عام', '3001', generalCat, 15, 7, 25, 1);
-
-    const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-    insertSetting.run('store_name', 'الإدارة العامة لشئون المجندين');
-    insertSetting.run('currency', 'ج.م');
-    insertSetting.run('tax_percent', '0');
-    insertSetting.run('receipt_width_mm', '58');
-    insertSetting.run('logo_data_url', DEFAULT_LOGO_DATA_URL);
-  }
-  // No default users are created: on a fresh install the first admin account is
-  // created from the login screen (see createInitialAdmin).
-}
-seedIfEmpty();
-
-// One-time migration: earlier installs seeded a placeholder store name and no receipt width.
-const currentStoreName = db.prepare("SELECT value FROM settings WHERE key = 'store_name'").get();
-if (currentStoreName && currentStoreName.value === 'متجري') {
-  db.prepare("UPDATE settings SET value = ? WHERE key = 'store_name'").run('الإدارة العامة لشئون المجندين');
-}
-const hasReceiptWidth = db.prepare("SELECT 1 FROM settings WHERE key = 'receipt_width_mm'").get();
-if (!hasReceiptWidth) {
-  db.prepare("INSERT INTO settings (key, value) VALUES ('receipt_width_mm', '58')").run();
-}
-const hasResetPeriod = db.prepare("SELECT 1 FROM settings WHERE key = 'invoice_reset_period'").get();
-if (!hasResetPeriod) {
-  db.prepare("INSERT INTO settings (key, value) VALUES ('invoice_reset_period', 'monthly')").run();
-}
-const hasLowStockThreshold = db.prepare("SELECT 1 FROM settings WHERE key = 'low_stock_threshold'").get();
-if (!hasLowStockThreshold) {
-  db.prepare("INSERT INTO settings (key, value) VALUES ('low_stock_threshold', '5')").run();
-}
-const hasLogo = db.prepare("SELECT 1 FROM settings WHERE key = 'logo_data_url'").get();
-if (!hasLogo) {
-  db.prepare("INSERT INTO settings (key, value) VALUES ('logo_data_url', ?)").run(DEFAULT_LOGO_DATA_URL);
-}
+// Settings every installation has. Only missing keys are inserted, so values that already exist,
+// including any store name, logo or currency a customer chose, are never changed. The product
+// ships no store identity, currency or catalog: the first admin enters the store name and currency
+// during first-run setup, and the catalog starts empty.
+const SETTING_DEFAULTS = {
+  store_name: '',
+  currency: '',
+  tax_percent: '0',
+  receipt_width_mm: '58',
+  invoice_reset_period: 'monthly',
+  low_stock_threshold: '5',
+  logo_data_url: '',
+};
+const insertMissingSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+for (const [key, value] of Object.entries(SETTING_DEFAULTS)) insertMissingSetting.run(key, value);
 
 // ---------- Financial model (single source for reports and daily closing) ----------
 // Per invoice: taxable = subtotal - discount, tax = taxable * rate, total = taxable + tax.
@@ -238,11 +199,15 @@ module.exports = {
     return db.prepare('SELECT COUNT(*) AS c FROM users').get().c > 0;
   },
 
-  // First-run setup: only possible while the users table is completely empty.
-  createInitialAdmin(username, pin) {
+  // First-run setup: only possible while the users table is completely empty. The store name and
+  // currency entered on the setup screen are saved in the same transaction.
+  createInitialAdmin(username, pin, profile = {}) {
     const name = v.requiredText(username, 'اسم المستخدم', 50);
     const policyError = pinPolicyError(pin);
     if (policyError) throw new v.ValidationError(policyError);
+    const storeProfile = profile && typeof profile === 'object' ? profile : {};
+    const storeName = storeProfile.storeName === undefined ? undefined : SETTING_VALIDATORS.store_name(storeProfile.storeName);
+    const currency = storeProfile.currency === undefined ? undefined : SETTING_VALIDATORS.currency(storeProfile.currency);
     const pinHash = hashPin(pin);
     return db.transaction(() => {
       if (db.prepare('SELECT COUNT(*) AS c FROM users').get().c > 0) {
@@ -250,6 +215,9 @@ module.exports = {
       }
       const id = db.prepare("INSERT INTO users (username, pin, pin_hash, role) VALUES (?, ?, ?, 'admin')")
         .run(name, unusableLegacyPin(), pinHash).lastInsertRowid;
+      const setSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+      if (storeName !== undefined) setSetting.run('store_name', storeName);
+      if (currency !== undefined) setSetting.run('currency', currency);
       return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id));
     })();
   },

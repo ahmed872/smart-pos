@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('api', {
     logout: () => ipcRenderer.invoke('auth:logout'),
     me: () => ipcRenderer.invoke('auth:me'),
     needsSetup: () => ipcRenderer.invoke('auth:needsSetup'),
-    setupAdmin: (username, pin) => ipcRenderer.invoke('auth:setupAdmin', username, pin),
+    setupAdmin: (username, pin, profile) => ipcRenderer.invoke('auth:setupAdmin', username, pin, profile),
     changePin: (currentPin, newPin) => ipcRenderer.invoke('auth:changePin', currentPin, newPin),
   },
   users: {

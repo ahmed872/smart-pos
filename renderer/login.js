@@ -37,14 +37,20 @@ async function attemptLogin() {
 }
 
 async function submitSetup() {
+  const storeName = document.getElementById('setupStoreName').value.trim();
+  const currency = document.getElementById('setupCurrency').value.trim();
   const username = document.getElementById('setupUsername').value.trim();
   const pin = document.getElementById('setupPin').value;
+  if (!storeName) {
+    showError('اسم المتجر مطلوب');
+    return;
+  }
   if (pin !== document.getElementById('setupPinConfirm').value) {
     showError('الرقم السري وتأكيده غير متطابقين');
     return;
   }
   try {
-    await window.api.auth.setupAdmin(username, pin);
+    await window.api.auth.setupAdmin(username, pin, { storeName, currency });
   } catch (err) {
     showError(errorText(err));
     return;
@@ -78,6 +84,6 @@ document.getElementById('changePinBtn').addEventListener('click', submitPinChang
 window.api.auth.needsSetup().then((needsSetup) => {
   if (needsSetup) {
     showSection('setupSection');
-    document.getElementById('setupUsername').focus();
+    document.getElementById('setupStoreName').focus();
   }
 });
