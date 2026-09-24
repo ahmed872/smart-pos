@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>سيستم كاشير</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div id="sidebarBrand" style="margin:0 0 20px;text-align:center;"></div>
+      <button class="nav-btn active" data-view="pos">نقطة البيع</button>
+      <button class="nav-btn" data-view="products">المنتجات</button>
+      <button class="nav-btn" data-view="sales">سجل المبيعات</button>
+      <button class="nav-btn" data-view="dayclose">إغلاق اليوم</button>
+      <button class="nav-btn admin-only" data-view="reports">التقارير</button>
+      <button class="nav-btn admin-only" data-view="users">الموظفون</button>
+      <button class="nav-btn admin-only" data-view="settings">الإعدادات</button>
+      <button class="nav-btn" id="openKitchenBtn">شاشة المطبخ ⤴</button>
+      <div id="lowStockBadge" style="display:none;background:#fef3c7;color:#92400e;font-size:12px;padding:8px;border-radius:8px;margin-top:8px;"></div>
+      <div style="flex:1;"></div>
+      <div id="userBadge" style="color:var(--text-dim);font-size:13px;margin-bottom:6px;"></div>
+      <button class="nav-btn" id="logoutBtn">تسجيل الخروج</button>
+    </aside>
+
+    <main class="main-content">
+      <!-- POS View -->
+      <section class="view active" id="view-pos">
+        <div class="pos-toolbar">
+          <input id="barcodeInput" placeholder="امسح الباركود أو اكتبه واضغط Enter" autocomplete="off" />
+        </div>
+        <div class="pos-layout">
+          <div class="product-grid" id="productGrid"></div>
+          <div class="cart-panel">
+            <h3>الفاتورة الحالية</h3>
+            <div class="cart-items" id="cartItems"></div>
+            <div class="totals-box">
+              <div class="row"><span>الإجمالي الفرعي</span><span id="subtotalText">0.00</span></div>
+              <div class="row">
+                <span>الخصم</span>
+                <input type="number" id="discountInput" value="0" min="0" style="width:80px;background:var(--panel-light);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 6px;" />
+              </div>
+              <div class="row"><span>الضريبة</span><span id="taxText">0.00</span></div>
+              <div class="row grand"><span>الإجمالي</span><span id="totalText">0.00</span></div>
+            </div>
+            <select id="paymentMethod" style="margin-top:8px;padding:8px;background:var(--panel-light);border:1px solid var(--border);color:var(--text);border-radius:6px;">
+              <option value="cash">نقدًا</option>
+              <option value="card">بطاقة</option>
+            </select>
+            <button class="primary" id="checkoutBtn">إتمام البيع</button>
+            <button class="secondary" id="clearCartBtn" style="margin-top:8px;">إفراغ الفاتورة</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Products View -->
+      <section class="view" id="view-products">
+        <h2>إدارة المنتجات</h2>
+        <div class="card-box">
+          <h3 id="productFormTitle">إضافة منتج جديد</h3>
+          <div class="form-row"><label>اسم المنتج</label><input id="pName" /></div>
+          <div class="form-row"><label>الباركود</label><input id="pBarcode" /></div>
+          <div class="form-row"><label>الفئة</label><select id="pCategory"></select></div>
+          <div class="form-row"><label>السعر</label><input id="pPrice" type="number" step="0.01" /></div>
+          <div class="form-row"><label>التكلفة</label><input id="pCost" type="number" step="0.01" /></div>
+          <div class="form-row"><label>الكمية بالمخزون</label><input id="pStock" type="number" step="1" /></div>
+          <div class="form-row">
+            <label><input type="checkbox" id="pTrackStock" /> تتبع المخزون</label>
+          </div>
+          <div class="form-row">
+            <label>صورة المنتج</label>
+            <div id="pImagePreview" style="margin-bottom:6px;"></div>
+            <input id="pImageInput" type="file" accept="image/*" />
+          </div>
+          <button class="primary" id="saveProductBtn">حفظ المنتج</button>
+          <button class="secondary" id="cancelEditBtn" style="margin-top:8px;display:none;">إلغاء التعديل</button>
+        </div>
+        <table>
+          <thead><tr><th></th><th>الاسم</th><th>الفئة</th><th>السعر</th><th>المخزون</th><th></th></tr></thead>
+          <tbody id="productsTableBody"></tbody>
+        </table>
+      </section>
+
+      <!-- Sales View -->
+      <section class="view" id="view-sales">
+        <h2>سجل المبيعات</h2>
+        <table>
+          <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الإجمالي</th><th>طريقة الدفع</th><th></th></tr></thead>
+          <tbody id="salesTableBody"></tbody>
+        </table>
+        <div id="saleDetailBox" class="card-box" style="display:none;max-width:700px;"></div>
+      </section>
+
+      <!-- Day Close View -->
+      <section class="view" id="view-dayclose">
+        <h2>إغلاق اليوم</h2>
+        <div class="card-box" style="max-width:500px;">
+          <div class="form-row"><label>التاريخ</label><input id="dayCloseDate" type="date" /></div>
+          <button class="secondary" id="loadDayCloseBtn">عرض</button>
+          <button class="primary" id="printDayCloseBtn" style="margin-top:8px;">طباعة تقرير الإغلاق</button>
+        </div>
+        <div id="dayCloseResults"></div>
+      </section>
+
+      <!-- Reports View -->
+      <section class="view" id="view-reports">
+        <h2>التقارير</h2>
+        <div class="card-box" style="max-width:700px;">
+          <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-row"><label>من تاريخ</label><input id="reportFrom" type="date" /></div>
+            <div class="form-row"><label>إلى تاريخ</label><input id="reportTo" type="date" /></div>
+            <button class="secondary" id="loadReportBtn" style="height:38px;">عرض</button>
+            <button class="secondary" id="exportPdfBtn" style="height:38px;">تصدير PDF</button>
+            <button class="secondary" id="exportExcelBtn" style="height:38px;">تصدير Excel</button>
+          </div>
+        </div>
+        <div id="reportResults"></div>
+      </section>
+
+      <!-- Users View -->
+      <section class="view" id="view-users">
+        <h2>الموظفون والصلاحيات</h2>
+        <div class="card-box">
+          <div class="form-row"><label>اسم المستخدم</label><input id="uUsername" /></div>
+          <div class="form-row"><label>الرقم السري</label><input id="uPin" type="password" /></div>
+          <div class="form-row">
+            <label>الصلاحية</label>
+            <select id="uRole">
+              <option value="cashier">كاشير</option>
+              <option value="admin">مدير</option>
+            </select>
+          </div>
+          <button class="primary" id="saveUserBtn">حفظ المستخدم</button>
+        </div>
+        <table>
+          <thead><tr><th>اسم المستخدم</th><th>الصلاحية</th><th>الحالة</th><th></th></tr></thead>
+          <tbody id="usersTableBody"></tbody>
+        </table>
+      </section>
+
+      <!-- Settings View -->
+      <section class="view" id="view-settings">
+        <h2>الإعدادات</h2>
+        <div class="card-box">
+          <div class="form-row"><label>اسم المتجر / الجهة</label><input id="sStoreName" /></div>
+          <div class="form-row"><label>رمز العملة</label><input id="sCurrency" /></div>
+          <div class="form-row"><label>نسبة الضريبة %</label><input id="sTax" type="number" step="0.1" /></div>
+          <div class="form-row"><label>عرض الفاتورة عند الطباعة (مم)</label><input id="sReceiptWidth" type="number" step="1" min="30" max="120" /></div>
+          <div class="form-row">
+            <label>تصفير ترقيم الفواتير</label>
+            <select id="sInvoiceReset">
+              <option value="monthly">كل شهر</option>
+              <option value="weekly">كل أسبوع</option>
+              <option value="never">بدون تصفير</option>
+            </select>
+          </div>
+          <div class="form-row"><label>حد تنبيه المخزون المنخفض</label><input id="sLowStock" type="number" step="1" min="0" /></div>
+          <button class="primary" id="saveSettingsBtn">حفظ الإعدادات</button>
+        </div>
+        <div class="card-box">
+          <h3>شعار الجهة</h3>
+          <div id="logoPreviewBox" style="margin-bottom:10px;"></div>
+          <div class="form-row"><input id="logoFileInput" type="file" accept="image/*" /></div>
+          <button class="secondary" id="saveLogoBtn">حفظ الشعار</button>
+          <p style="color:var(--text-dim);font-size:12px;margin-top:8px;">الشعار هيظهر تلقائيًا فوق الفاتورة وتقرير الإغلاق وتقرير الـ PDF.</p>
+        </div>
+        <div class="card-box">
+          <h3>إضافة فئة جديدة</h3>
+          <div class="form-row"><label>اسم الفئة</label><input id="catName" /></div>
+          <div class="form-row"><label><input type="checkbox" id="catIsKitchen" /> فئة مطبخ (تظهر في شاشة المطبخ)</label></div>
+          <button class="secondary" id="addCategoryBtn">إضافة الفئة</button>
+        </div>
+        <div class="card-box">
+          <h3>النسخ الاحتياطي</h3>
+          <p style="color:var(--text-dim);font-size:13px;" id="dbPathText"></p>
+          <button class="primary" id="createBackupBtn">أخذ نسخة احتياطية</button>
+          <button class="secondary" id="restoreBackupBtn" style="margin-top:8px;">استعادة نسخة احتياطية</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

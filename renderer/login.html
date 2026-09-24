@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>تسجيل الدخول - سيستم كاشير</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body style="display:flex;align-items:center;justify-content:center;height:100vh;">
+  <div class="card-box" style="width:380px;">
+    <div style="text-align:center;">
+      <img src="assets/login-emblem.png" alt="الشعار" style="width:190px;height:auto;" />
+    </div>
+    <p style="text-align:center;color:var(--text-dim);margin-top:4px;">نظام نقطة البيع</p>
+    <div class="form-row">
+      <label>اسم المستخدم</label>
+      <input id="username" autofocus />
+    </div>
+    <div class="form-row">
+      <label>الرقم السري (PIN)</label>
+      <input id="pin" type="password" />
+    </div>
+    <p id="errorMsg" style="color:var(--danger);display:none;"></p>
+    <button class="primary" id="loginBtn">دخول</button>
+  </div>
+  <script src="login.js"></script>
+</body>
+</html>
