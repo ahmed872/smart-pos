@@ -64,15 +64,17 @@ for ($n = 1; $n -le $Attempts; $n++) {
   $sw.Stop()
   $exe = $null
   for ($i = 0; $i -lt 20 -and $null -eq $exe; $i++) { $exe = Get-InstalledExe; if (-not $exe) { Start-Sleep -Milliseconds 500 } }
-  $ok = ($p.ExitCode -eq 0 -and $null -ne $exe)
+  # the install location must stay exactly where every earlier version installed to
+  $expectedDir = Join-Path $installRoot 'Cashier System'
+  $ok = ($p.ExitCode -eq 0 -and $null -ne $exe -and $exe.DirectoryName -eq $expectedDir)
   $code = '0x' + ([BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$p.ExitCode), 0)).ToString('X8')
-  $entry = [ordered]@{ attempt = $n; ok = $ok; exitCode = $p.ExitCode; exitHex = $code; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); installed = [bool]$exe; events = @() }
+  $entry = [ordered]@{ attempt = $n; ok = $ok; exitCode = $p.ExitCode; exitHex = $code; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); installed = [bool]$exe; dir = $(if ($exe) { $exe.DirectoryName } else { '' }); events = @() }
   if (-not $ok) {
     Start-Sleep -Seconds 3   # give WER time to write its events/dumps
     $entry.events = @(Get-CrashEvents $start)
   }
   $results += [pscustomobject]$entry
-  Write-Host ("attempt {0,2}: {1}  exit={2} ({3})  {4}s  installed={5}" -f $n, $(if ($ok) { 'OK  ' } else { 'FAIL' }), $p.ExitCode, $code, $entry.seconds, [bool]$exe)
+  Write-Host ("attempt {0,2}: {1}  exit={2} ({3})  {4}s  installed={5}  dir={6}" -f $n, $(if ($ok) { 'OK  ' } else { 'FAIL' }), $p.ExitCode, $code, $entry.seconds, [bool]$exe, $entry.dir)
   foreach ($e in $entry.events) { Write-Host "    $e" }
   if (-not $ok) {
     $newDumps = @(Get-ChildItem $dumpDir -Filter '*.dmp' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $start })
