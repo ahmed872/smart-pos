@@ -1,3 +1,6 @@
+const { escapeHtml } = window.StoreIdentity;
+const { userMessage } = window.UiMessages;
+
 let categories = [];
 let products = [];
 let cart = []; // { product_id, name, qty, unit_price, is_kitchen_item }
@@ -36,6 +39,7 @@ async function init() {
   if (currentUser.role === 'admin') setupBackupHandlers();
   setupLogoHandlers();
   setupDayCloseHandlers();
+  showAbout();
 
   const today = new Date().toISOString().slice(0, 10);
   document.getElementById('reportFrom').value = today;
@@ -104,6 +108,12 @@ function setupNav() {
 function renderProductGrid() {
   const grid = document.getElementById('productGrid');
   grid.innerHTML = '';
+  if (products.length === 0) {
+    grid.innerHTML = `<p style="color:var(--text-dim);padding:12px;">${currentUser.role === 'admin'
+      ? 'لا توجد منتجات بعد. أضف المنتجات من شاشة "المنتجات".'
+      : 'لا توجد منتجات بعد. يمكن للمدير إضافة المنتجات.'}</p>`;
+    return;
+  }
 
   const byCategory = new Map();
   for (const p of products) {
@@ -262,7 +272,7 @@ function setupPosHandlers() {
         paymentMethod,
       });
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     }
 
@@ -279,7 +289,7 @@ function setupPosHandlers() {
       try {
         await window.api.print.receipt(result.saleId);
       } catch (err) {
-        alert('تعذرت الطباعة: ' + err.message);
+        alert(userMessage(err));
       }
     }
   });
@@ -288,12 +298,16 @@ function setupPosHandlers() {
 async function refreshSalesTable() {
   const sales = await window.api.sales.list(100);
   const body = document.getElementById('salesTableBody');
+  if (sales.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" style="color:var(--text-dim);">لا توجد فواتير بعد.</td></tr>';
+    return;
+  }
   body.innerHTML = sales.map((s) => `
     <tr>
-      <td>${s.sale_number}</td>
-      <td>${s.created_at}</td>
-      <td>${s.total.toFixed(2)}</td>
-      <td>${s.payment_method === 'cash' ? 'نقدًا' : 'بطاقة'}</td>
+      <td><bdi dir="ltr">${escapeHtml(s.sale_number)}</bdi></td>
+      <td>${window.StoreIdentity.formatDateTime(s.created_at)}</td>
+      <td>${window.StoreIdentity.money(s.total, settings.currency)}</td>
+      <td>${window.StoreIdentity.paymentLabel(s.payment_method)}</td>
       <td>
         <button class="secondary" data-view-sale="${s.id}">تفاصيل</button>
         <button class="secondary" data-print-sale="${s.id}">طباعة</button>
@@ -309,7 +323,7 @@ async function refreshSalesTable() {
       try {
         await window.api.print.receipt(Number(btn.dataset.printSale));
       } catch (err) {
-        alert('تعذرت الطباعة: ' + err.message);
+        alert(userMessage(err));
       }
     });
   });
@@ -361,7 +375,7 @@ async function showSaleDetail(saleId) {
         renderProductGrid();
         updateLowStockBadge();
       } catch (err) {
-        alert(err.message);
+        alert(userMessage(err));
       }
     });
   });
@@ -387,7 +401,7 @@ async function refreshProductsTable() {
       try {
         await window.api.products.delete(Number(btn.dataset.delete));
       } catch (err) {
-        alert(err.message);
+        alert(userMessage(err));
         return;
       }
       products = await window.api.products.list();
@@ -474,7 +488,7 @@ function setupProductHandlers() {
         image_data_url: pendingProductImage,
       });
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     }
     resetProductForm();
@@ -516,7 +530,7 @@ function setupSettingsHandlers() {
       // validated and saved together: either every value is stored or none is
       await window.api.settings.saveMany(values);
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     } finally {
       settings = await window.api.settings.get();
@@ -533,7 +547,7 @@ function setupSettingsHandlers() {
     try {
       await window.api.categories.save(name, document.getElementById('catIsKitchen').checked);
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     }
     categories = await window.api.categories.list();
@@ -629,7 +643,7 @@ async function refreshUsersTable() {
       try {
         await window.api.users.setActive(id, !isActive);
       } catch (err) {
-        alert(err.message);
+        alert(userMessage(err));
       }
       await refreshUsersTable();
     });
@@ -655,7 +669,7 @@ function setupUsersHandlers() {
     try {
       await window.api.users.save(payload);
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     }
     roleChangedByUser = false;
@@ -701,7 +715,7 @@ function setupLogoHandlers() {
     try {
       await window.api.settings.save('logo_data_url', pendingDataUrl);
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     }
     pendingDataUrl = null;
@@ -717,7 +731,7 @@ function setupLogoHandlers() {
     try {
       await window.api.settings.save('logo_data_url', '');
     } catch (err) {
-      alert(err.message);
+      alert(userMessage(err));
       return;
     }
     pendingDataUrl = null;
@@ -727,6 +741,12 @@ function setupLogoHandlers() {
     renderLogoPreview();
     alert('تمت إزالة الشعار');
   });
+}
+
+async function showAbout() {
+  const info = await window.api.app.info();
+  document.getElementById('aboutText').innerHTML =
+    `${escapeHtml(info.name)} — الإصدار <bdi dir="ltr">${escapeHtml(info.version)}</bdi>`;
 }
 
 function setupDayCloseHandlers() {
@@ -754,15 +774,10 @@ function setupDayCloseHandlers() {
     try {
       await window.api.print.dayClose(date);
     } catch (err) {
-      alert('تعذرت الطباعة: ' + err.message);
+      alert(userMessage(err));
     }
   });
 }
 
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
 
 init();

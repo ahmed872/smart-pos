@@ -63,6 +63,68 @@ jobs:
           $env:PLAYWRIGHT_CORE = "$env:RUNNER_TEMP\pw\node_modules\playwright-core"
           node scripts/ci/e2e-functional.js
 
+      # Same functional checks against the packaged application contents (app.asar after
+      # electron-builder's file filtering): proves nothing the runtime needs was excluded.
+      - name: Functional end-to-end test on the packaged app.asar
+        shell: pwsh
+        run: |
+          $env:PLAYWRIGHT_CORE = "$env:RUNNER_TEMP\pw\node_modules\playwright-core"
+          $env:E2E_APP_DIR = "$PWD\dist\win-unpacked\resources\app.asar"
+          node scripts/ci/e2e-functional.js
+
       - name: Packaged app - existing data, hardening, uninstall and reinstall
         shell: pwsh
         run: ./scripts/ci/windows-packaged-smoke.ps1 -Phase Existing
+
+  # Upgrade from the released v1.1.0: its own installer (from the GitHub Release) and its own code
+  # (from the tag) create real customer data; this build is then installed over it.
+  upgrade-from-v1-1-0:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (lockfile only)
+        run: npm ci
+
+      - name: Build Windows installer
+        run: npm run dist
+
+      - name: Prepare v1.1.0 (code from its tag, installer from its GitHub Release)
+        shell: pwsh
+        run: |
+          git worktree add "$env:RUNNER_TEMP\v110" v1.1.0
+          Push-Location "$env:RUNNER_TEMP\v110"
+          npm ci
+          npx electron-builder install-app-deps
+          Pop-Location
+          Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/download/v1.1.0/Cashier.System.Setup.1.1.0.exe" -OutFile "$env:RUNNER_TEMP\v110-setup.exe"
+          npm install --no-save --prefix "$env:RUNNER_TEMP\pw" playwright-core@1.56.1
+
+      - name: Install released v1.1.0 and create customer data with it
+        shell: pwsh
+        run: |
+          # v1.1.0's installer has the intermittent 0xC0000005 start-up crash fixed after that
+          # release, so a failed attempt of the OLD installer is retried.
+          for ($i = 1; $i -le 3; $i++) {
+            $p = Start-Process "$env:RUNNER_TEMP\v110-setup.exe" -ArgumentList '/S' -Wait -PassThru
+            Write-Host "v1.1.0 install attempt $i exit=$($p.ExitCode)"
+            if ($p.ExitCode -eq 0) { break }
+          }
+          if ($p.ExitCode -ne 0) { throw 'v1.1.0 installer failed' }
+          $env:PLAYWRIGHT_CORE = "$env:RUNNER_TEMP\pw\node_modules\playwright-core"
+          node "$env:RUNNER_TEMP\v110\scripts\ci\e2e-functional.js"
+          if ($LASTEXITCODE) { throw 'v1.1.0 functional run failed' }
+          $env:E2E_APP_DIR = "$env:RUNNER_TEMP\v110"
+          node scripts/ci/upgrade-seed.js "$env:RUNNER_TEMP\snapshot.json"
+          if ($LASTEXITCODE) { throw 'seeding v1.1.0 data failed' }
+
+      - name: Upgrade to this build and verify customer data
+        shell: pwsh
+        run: ./scripts/ci/windows-upgrade.ps1 -Snapshot "$env:RUNNER_TEMP\snapshot.json"

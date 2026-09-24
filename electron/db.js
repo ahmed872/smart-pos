@@ -7,6 +7,9 @@ const { hashPin, verifyPin, burnVerify, isDisclosedDefaultPin, pinPolicyError } 
 const v = require('./validation.js');
 const { applySchema } = require('./schema.js');
 
+// The data folder keeps its original name on purpose: renaming it would mean moving a customer's
+// live database, safety backups and quarantine at first start, and older installers would no
+// longer find the data after a reinstall. The risk to customer data outweighs a nicer name.
 const dbDir = path.join(app.getPath('appData'), 'SystemDB');
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 const dbPath = path.join(dbDir, 'smart-pos.db');
@@ -239,7 +242,7 @@ module.exports = {
     }
     const policyError = pinPolicyError(newPin);
     if (policyError) throw new v.ValidationError(policyError);
-    if (verifyPin(newPin, user.pin_hash)) throw new v.ValidationError('الرقم السري الجديد لازم يختلف عن الحالي');
+    if (verifyPin(newPin, user.pin_hash)) throw new v.ValidationError('يجب أن يختلف الرقم السري الجديد عن الرقم الحالي');
     db.prepare('UPDATE users SET pin_hash = ?, must_change_pin = 0 WHERE id = ?').run(hashPin(newPin), userId);
     return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(userId));
   },

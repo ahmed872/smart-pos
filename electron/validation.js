@@ -27,13 +27,13 @@ function nonNegativeNumber(value, label) {
 
 function positiveNumber(value, label) {
   const n = toFiniteNumber(value, label);
-  if (n <= 0) fail(`${label}: لازم تكون أكبر من صفر`);
+  if (n <= 0) fail(`${label}: يجب أن تكون أكبر من صفر`);
   return n;
 }
 
 function numberInRange(value, label, min, max) {
   const n = toFiniteNumber(value, label);
-  if (n < min || n > max) fail(`${label}: لازم تكون بين ${min} و ${max}`);
+  if (n < min || n > max) fail(`${label}: يجب أن تكون بين ${min} و ${max}`);
   return n;
 }
 
@@ -99,7 +99,7 @@ const MAX_IMAGE_DATA_URL_LENGTH = 8 * 1024 * 1024;
 function optionalImageDataUrl(value, label) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value !== 'string' || value.length > MAX_IMAGE_DATA_URL_LENGTH || !IMAGE_DATA_URL_RE.test(value)) {
-    fail(`${label}: لازم تكون ملف صورة صالح`);
+    fail(`${label}: يجب أن يكون ملف صورة صالحًا`);
   }
   return value;
 }

@@ -12,6 +12,9 @@ const { execFileSync } = require('node:child_process');
 const { _electron: electron } = require(process.env.PLAYWRIGHT_CORE || 'playwright-core');
 
 const ROOT = path.join(__dirname, '..', '..');
+// E2E_APP_DIR=<...>/resources/app.asar runs the same checks against the packaged application
+// contents (after electron-builder's file filtering), with the development Electron binary.
+const APP_DIR = process.env.E2E_APP_DIR || ROOT;
 const electronExe = require(path.join(ROOT, 'node_modules', 'electron')); // path to the binary
 const extraArgs = process.platform === 'linux' ? ['--no-sandbox'] : [];
 
@@ -25,6 +28,7 @@ const dbFile = path.join(sysDir, 'smart-pos.db');
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'smart-pos-e2e-'));
 
 const results = [];
+const ALL_DIALOGS = []; // every alert/confirm text shown during the whole run (all app launches)
 function check(name, ok, detail = '') {
   results.push({ name, ok: !!ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
@@ -36,11 +40,11 @@ function inspectDb() {
 }
 
 async function launch() {
-  const app = await electron.launch({ executablePath: electronExe, args: [ROOT, ...extraArgs] });
+  const app = await electron.launch({ executablePath: electronExe, args: [APP_DIR, ...extraArgs] });
   const win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');
   const dialogs = [];
-  win.on('dialog', (d) => { dialogs.push(d.message()); d.accept().catch(() => {}); });
+  win.on('dialog', (d) => { dialogs.push(d.message()); ALL_DIALOGS.push(d.message()); d.accept().catch(() => {}); });
   return { app, win, dialogs };
 }
 
@@ -116,6 +120,11 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   check('first run: no demo products or categories',
     (await api(win, 'window.api.products.list()')).value.length === 0 && (await api(win, 'window.api.categories.list()')).value.length === 0);
   check('sidebar shows the store name', (await win.textContent('#sidebarBrand')).includes(STORE.name));
+  check('empty catalog shows a clear message', (await win.textContent('#productGrid')).includes('لا توجد منتجات بعد'));
+  check('window title uses the product name', (await win.title()) === 'سيستم كاشير');
+  const pkgVersion = require(path.join(ROOT, 'package.json')).version;
+  check('about section shows product name and version',
+    (await win.textContent('#aboutText')).includes('سيستم كاشير') && (await win.textContent('#aboutText')).includes(pkgVersion));
 
   // ---- store logo: upload, then remove
   await win.click('.nav-btn[data-view="settings"]');
@@ -159,6 +168,10 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   await addProduct('NEGATIVE', -5);
   products = (await api(win, 'window.api.products.list()')).value;
   check('negative price rejected via UI', products.length === before && dialogs.some((m) => /سالبة/.test(m)));
+  const dup1 = await api(win, "window.api.products.save({name:'DUP-1',price:1,barcode:'999001'})");
+  const dup2 = await api(win, "window.api.products.save({name:'DUP-2',price:1,barcode:'999001'})");
+  check('duplicate barcode gives a clear Arabic message', dup1.ok && !dup2.ok && /الباركود مستخدم لمنتج آخر/.test(dup2.error));
+  await api(win, `window.api.products.delete(${dup1.value})`);
 
   await win.click('.nav-btn[data-view="settings"]');
   await win.fill('#sTax', '14');
@@ -233,7 +246,10 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   check('PINs stored hashed (scrypt), never plaintext', inspected.users.length === 2 && inspected.users.every((u) => u.hashed));
 
   // ---- printed documents use the same store identity (rendered pages, as printed)
-  const page = (f) => 'file://' + path.join(ROOT, 'renderer', f);
+  const page = (f) => {
+    const [file, query] = f.split('?');
+    return require('node:url').pathToFileURL(path.join(APP_DIR, 'renderer', file)).href + (query ? `?${query}` : '');
+  };
   const day = sales[0].created_at.slice(0, 10);
   await win.goto(page(`receipt.html?saleId=${sales[0].id}`));
   await win.waitForTimeout(800);
@@ -300,6 +316,10 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   await app.close();
   const final = inspectDb();
   check('database integrity ok at the end', final.integrity === 'ok');
+
+  check('no technical/English error text was ever shown to the user',
+    ALL_DIALOGS.length > 0 && ALL_DIALOGS.every((m) => !/Error invoking|remote method|SqliteError|constraint/i.test(m)),
+    `${ALL_DIALOGS.length} dialogs checked`);
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

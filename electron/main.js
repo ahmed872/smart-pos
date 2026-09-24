@@ -14,6 +14,9 @@ let kitchenWindow;
 // request (see authorize), so role changes and deactivation apply immediately.
 let sessionUserId = null;
 
+// User-facing product name (Arabic UI); Windows installs it as "Cashier System" (productName).
+const PRODUCT_NAME = 'سيستم كاشير';
+
 const rendererDir = path.join(__dirname, '..', 'renderer');
 const appIconPath = path.join(rendererDir, 'assets', 'app-icon.png');
 
@@ -50,7 +53,7 @@ function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    title: 'سيستم كاشير',
+    title: PRODUCT_NAME,
     icon: appIconPath,
     webPreferences: secureWebPreferences(),
   });
@@ -65,7 +68,7 @@ function createKitchenWindow() {
   kitchenWindow = new BrowserWindow({
     width: 900,
     height: 700,
-    title: 'شاشة المطبخ - سيستم كاشير',
+    title: `شاشة المطبخ - ${PRODUCT_NAME}`,
     icon: appIconPath,
     webPreferences: secureWebPreferences(),
   });
@@ -73,6 +76,13 @@ function createKitchenWindow() {
   kitchenWindow.on('closed', () => {
     kitchenWindow = null;
   });
+}
+
+// Electron reports print failures in English ('cancelled', 'failed', ...).
+function printError(reason) {
+  if (!reason || reason === 'cancelled') return new Error('تم إلغاء الطباعة');
+  console.error('[print] failed:', reason);
+  return new Error('تعذرت الطباعة. تأكد من توصيل الطابعة وتشغيلها ثم حاول مرة أخرى.');
 }
 
 function printReceipt(saleId) {
@@ -90,7 +100,7 @@ function printReceipt(saleId) {
       receiptWindow.webContents.print({ silent: false }, (success, reason) => {
         receiptWindow.close();
         if (success) resolve(true);
-        else reject(new Error(reason || 'تم إلغاء الطباعة'));
+        else reject(printError(reason));
       });
     });
   });
@@ -111,7 +121,7 @@ function printDayClose(date) {
       closeWindow.webContents.print({ silent: false }, (success, reason) => {
         closeWindow.close();
         if (success) resolve(true);
-        else reject(new Error(reason || 'تم إلغاء الطباعة'));
+        else reject(printError(reason));
       });
     });
   });
@@ -146,7 +156,7 @@ async function exportReportPdf(fromDate, toDate) {
 async function createBackup() {
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
     title: 'حفظ نسخة احتياطية',
-    defaultPath: `smart-pos-backup-${new Date().toISOString().slice(0, 10)}.db`,
+    defaultPath: `cashier-system-backup-${new Date().toISOString().slice(0, 10)}.db`,
     filters: [{ name: 'SQLite Database', extensions: ['db'] }],
   });
   if (canceled || !filePath) return null;
@@ -183,7 +193,7 @@ async function restoreBackup() {
     defaultId: 0,
     cancelId: 0,
     title: 'تأكيد الاستعادة',
-    message: 'هيتم استبدال كل البيانات الحالية ببيانات النسخة الاحتياطية، وهيقفل البرنامج ويفتح تاني. متأكد؟\n\nهيتم حفظ نسخة أمان من البيانات الحالية قبل الاستعادة.',
+    message: 'سيتم استبدال جميع البيانات الحالية ببيانات النسخة الاحتياطية، ثم يُعاد تشغيل البرنامج. هل تريد المتابعة؟\n\nسيتم حفظ نسخة أمان من البيانات الحالية قبل الاستعادة.',
   });
   if (confirmed.response !== 1) {
     backup.discardStaged(stagedPath);
@@ -360,10 +370,39 @@ function authorize(access, event) {
   return user;
 }
 
+// ---------- Errors shown to users ----------
+// Every IPC failure reaches the renderer as an Arabic message the user can act on. Expected
+// errors (validation, permissions, backup checks, or any message already written in Arabic) pass
+// through; database constraint errors are translated; anything else is logged here with full
+// details for diagnostics and replaced by a generic message.
+const ARABIC_RE = /[\u0600-\u06ff]/;
+const DATABASE_MESSAGES = [
+  [/UNIQUE constraint failed: products\.barcode/, 'الباركود مستخدم لمنتج آخر'],
+  [/UNIQUE constraint failed: users\.username/, 'اسم المستخدم مستخدم بالفعل'],
+  [/UNIQUE constraint failed: categories\.name/, 'اسم الفئة موجود بالفعل'],
+  [/FOREIGN KEY constraint failed/, 'لا يمكن تنفيذ العملية لارتباطها ببيانات أخرى'],
+];
+const GENERIC_ERROR = 'حدث خطأ غير متوقع. حاول مرة أخرى، وإذا تكرر الخطأ تواصل مع الدعم الفني.';
+
+function toUserError(channel, err) {
+  const message = err && err.message ? String(err.message) : String(err);
+  for (const [re, text] of DATABASE_MESSAGES) if (re.test(message)) return new Error(text);
+  if (err instanceof v.ValidationError || err instanceof AccessDeniedError
+    || err instanceof backup.BackupValidationError || ARABIC_RE.test(message)) {
+    return new Error(message);
+  }
+  console.error(`[ipc] ${channel} failed:`, err);
+  return new Error(GENERIC_ERROR);
+}
+
 function handle(channel, access, fn) {
-  ipcMain.handle(channel, (event, ...args) => {
-    const user = authorize(access, event);
-    return fn(user, ...args);
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      const user = authorize(access, event);
+      return await fn(user, ...args);
+    } catch (err) {
+      throw toUserError(channel, err);
+    }
   });
 }
 
@@ -431,6 +470,8 @@ function registerIpcHandlers() {
   handle('print:dayClose', Access.USER, (_user, date) => printDayClose(v.dateString(date)));
   handle('print:qr', Access.USER, (_user, text) =>
     QRCode.toDataURL(v.requiredText(text, 'النص', 500), { margin: 0, width: 140 }));
+
+  handle('app:info', Access.USER, () => ({ name: PRODUCT_NAME, version: app.getVersion() }));
 
   handle('nav:goToApp', Access.USER, () => {
     if (mainWindow) mainWindow.loadFile(path.join(rendererDir, 'index.html'));

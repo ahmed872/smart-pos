@@ -4,7 +4,9 @@
   "version": "1.1.0",
   "description": "نظام نقطة بيع لسطح المكتب - إدارة مبيعات ومخزون وشاشة مطبخ",
   "main": "electron/main.js",
-  "author": "ahmed872",
+  "author": {
+    "name": "Cashier System"
+  },
   "license": "UNLICENSED",
   "scripts": {
     "start": "electron .",
@@ -32,8 +34,13 @@
     "files": [
       "electron/**/*",
       "renderer/**/*",
-      "package.json"
+      "package.json",
+      "!**/node_modules/**/*.map",
+      "!**/node_modules/**/*.{ts,mts,cts}",
+      "!**/node_modules/**/{README,Readme,readme,CHANGELOG,Changelog,changelog,HISTORY,History,history,CONTRIBUTING,SECURITY,CODE_OF_CONDUCT,AUTHORS}{,.md,.markdown,.txt}",
+      "!**/node_modules/better-sqlite3/{src,deps}/**"
     ],
+    "copyright": "Copyright © 2026 Cashier System",
     "afterPack": "scripts/after-pack-fuses.js",
     "win": {
       "icon": "build/icon.ico",

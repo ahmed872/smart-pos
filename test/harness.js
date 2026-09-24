@@ -55,6 +55,7 @@ async function boot({ home, isPackaged = false, switches = [] } = {}) {
   fakeElectron = {
     app: {
       isPackaged,
+      getVersion: () => require(path.join(ROOT, 'package.json')).version,
       getPath: (name) => path.join(home, name),
       whenReady: () => Promise.resolve(),
       on: (name, fn) => appListeners.set(name, fn),

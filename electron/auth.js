@@ -15,6 +15,8 @@ const PIN_MAX_LENGTH = 64;
 // PINs that were published as defaults in earlier versions of this project
 // (README and source history). They are public knowledge, so accounts still
 // using them are forced to pick a new PIN and they can never be set again.
+// Needed at runtime: upgrading a v1.0.0 database relies on it. These are
+// rejected values, not working credentials; no account is created with them.
 const DISCLOSED_DEFAULT_PINS = new Set(['00102026', '1234', '1111']);
 
 function hashPin(pin) {
@@ -54,9 +56,9 @@ function isDisclosedDefaultPin(pin) {
 // Returns an Arabic error message, or null when the PIN is acceptable.
 function pinPolicyError(pin) {
   if (typeof pin !== 'string') return 'الرقم السري غير صالح';
-  if (pin.length < PIN_MIN_LENGTH) return `الرقم السري لازم يكون ${PIN_MIN_LENGTH} أحرف/أرقام على الأقل`;
-  if (pin.length > PIN_MAX_LENGTH) return `الرقم السري لازم يكون أقل من ${PIN_MAX_LENGTH} حرف`;
-  if (pin.trim() !== pin) return 'الرقم السري لا يجب أن يبدأ أو ينتهي بمسافة';
+  if (pin.length < PIN_MIN_LENGTH) return `يجب ألا يقل الرقم السري عن ${PIN_MIN_LENGTH} أحرف أو أرقام`;
+  if (pin.length > PIN_MAX_LENGTH) return `يجب ألا يزيد الرقم السري عن ${PIN_MAX_LENGTH} حرفًا`;
+  if (pin.trim() !== pin) return 'يجب ألا يبدأ الرقم السري أو ينتهي بمسافة';
   if (isDisclosedDefaultPin(pin)) return 'هذا الرقم السري كان افتراضيًا ومعروفًا للعامة، اختر رقمًا آخر';
   return null;
 }

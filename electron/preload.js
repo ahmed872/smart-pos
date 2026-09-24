@@ -60,6 +60,9 @@ contextBridge.exposeInMainWorld('api', {
     dayClose: (date) => ipcRenderer.invoke('print:dayClose', date),
     qr: (text) => ipcRenderer.invoke('print:qr', text),
   },
+  app: {
+    info: () => ipcRenderer.invoke('app:info'),
+  },
   nav: {
     goToApp: () => ipcRenderer.invoke('nav:goToApp'),
   },

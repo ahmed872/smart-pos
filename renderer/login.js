@@ -6,9 +6,8 @@ function showError(message) {
   errorMsg.style.display = message ? 'block' : 'none';
 }
 
-// Main-process errors arrive as "Error invoking remote method '...': Error: <message>".
 function errorText(err) {
-  return String(err && err.message ? err.message : err).replace(/^Error invoking remote method '[^']+': (\w*Error: )?/, '');
+  return window.UiMessages.userMessage(err);
 }
 
 function showSection(id) {
