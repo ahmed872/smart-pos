@@ -11,7 +11,7 @@ on:
       attempts:
         description: 'Installations per runner'
         required: false
-        default: '25'
+        default: '30'
 
 permissions:
   contents: read
@@ -39,7 +39,7 @@ jobs:
 
       - name: Repeated installation test
         shell: pwsh
-        run: ./scripts/ci/installer-stress.ps1 -Attempts ${{ github.event.inputs.attempts || 25 }} -Label ${{ matrix.runner }}
+        run: ./scripts/ci/installer-stress.ps1 -Attempts ${{ github.event.inputs.attempts || 30 }} -Label ${{ matrix.runner }}
 
       - name: Upload results and crash dumps
         if: always()

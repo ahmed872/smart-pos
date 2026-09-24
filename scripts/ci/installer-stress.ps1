@@ -65,7 +65,7 @@ for ($n = 1; $n -le $Attempts; $n++) {
   $exe = $null
   for ($i = 0; $i -lt 20 -and $null -eq $exe; $i++) { $exe = Get-InstalledExe; if (-not $exe) { Start-Sleep -Milliseconds 500 } }
   $ok = ($p.ExitCode -eq 0 -and $null -ne $exe)
-  $code = '0x{0:X8}' -f ([uint32]([int64]$p.ExitCode -band 0xFFFFFFFF))
+  $code = '0x' + ([BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$p.ExitCode), 0)).ToString('X8')
   $entry = [ordered]@{ attempt = $n; ok = $ok; exitCode = $p.ExitCode; exitHex = $code; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); installed = [bool]$exe; events = @() }
   if (-not $ok) {
     Start-Sleep -Seconds 3   # give WER time to write its events/dumps
@@ -74,6 +74,10 @@ for ($n = 1; $n -le $Attempts; $n++) {
   $results += [pscustomobject]$entry
   Write-Host ("attempt {0,2}: {1}  exit={2} ({3})  {4}s  installed={5}" -f $n, $(if ($ok) { 'OK  ' } else { 'FAIL' }), $p.ExitCode, $code, $entry.seconds, [bool]$exe)
   foreach ($e in $entry.events) { Write-Host "    $e" }
+  if (-not $ok) {
+    $newDumps = @(Get-ChildItem $dumpDir -Filter '*.dmp' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $start })
+    foreach ($d in $newDumps) { Write-Host "    dump: $($d.Name) ($($d.Length) bytes)" }
+  }
   Remove-Installation
 }
 
@@ -90,7 +94,8 @@ Write-Host "crash dumps collected: $($dumps.Count)"
 if ($cdb -and $dumps.Count) {
   foreach ($d in ($dumps | Select-Object -First 3)) {
     Write-Host "=== cdb analysis: $($d.Name)"
-    & $cdb.FullName -z $d.FullName -c '.ecxr; kb 20; lm; !analyze -v; q' 2>&1 | Select-String -Pattern 'FAULTING|MODULE_NAME|IMAGE_NAME|EXCEPTION_CODE|FAILURE_BUCKET|SYMBOL_NAME|STACK_TEXT|^[0-9a-f`]{8,} ' | Select-Object -First 60 | ForEach-Object { Write-Host "  $_" }
+    $out = & $cdb.FullName -z $d.FullName -c '.ecxr; r; kn 25; lmv m ns*; lm; !analyze -v; q' 2>&1 | Out-String
+    $out -split "`n" | Where-Object { $_ -match 'ExceptionCode|FAULTING_|MODULE_NAME|IMAGE_NAME|EXCEPTION_CODE|FAILURE_BUCKET|SYMBOL_NAME|PROCESS_NAME|READ_ADDRESS|WRITE_ADDRESS|ERROR_CODE|^\s*[0-9a-f]{2} [0-9a-f`]{8,}|^[0-9a-f`]{16} [0-9a-f`]{16} |Image path|Image name|Timestamp|^rip=|^rax=' } | Select-Object -First 90 | ForEach-Object { Write-Host "  $_" }
   }
 }
 
