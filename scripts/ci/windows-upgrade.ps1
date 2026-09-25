@@ -1,7 +1,7 @@
-# Upgrade test on Windows: the released v1.1.0 app is installed and has real data (created by the
-# v1.1.0 code, see windows-verify.yml); this installs the new build over it, starts the new packaged
-# app on that data and verifies that every piece of customer data is intact.
-param([Parameter(Mandatory = $true)][string]$Snapshot)
+# Upgrade test on Windows: a released version's app is installed and has real data (created by that
+# version's code, see windows-verify.yml); this installs the new build over it, starts the new
+# packaged app on that data and verifies that every piece of customer data is intact.
+param([Parameter(Mandatory = $true)][string]$Snapshot, [string]$FromVersion = 'v1.1.0')
 
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
@@ -21,8 +21,8 @@ function Run-App([int]$seconds = 15) {
   return $alive
 }
 
-Check 'released v1.1.0 app is installed' (Test-Path $exe) $exe
-Check 'released v1.1.0 app starts on its data' (Run-App)
+Check "released $FromVersion app is installed" (Test-Path $exe) $exe
+Check "released $FromVersion app starts on its data" (Run-App)
 
 $installer = Get-ChildItem (Join-Path $root 'dist') -Filter '*Setup*.exe' | Select-Object -First 1
 $p = Start-Process $installer.FullName -ArgumentList '/S' -Wait -PassThru
