@@ -17,6 +17,10 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      # Code signing is optional until a certificate is configured (see docs/CODE_SIGNING.md).
+      # Only whether the secret exists is exposed here, never its value.
+      HAS_SIGNING_CERT: ${{ secrets.WIN_CSC_LINK != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,8 +36,26 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build Windows installer
+      - name: Build Windows installer (unsigned, no certificate configured)
+        if: env.HAS_SIGNING_CERT != 'true'
         run: npm run dist
+
+      # electron-builder signs the app executable, the uninstaller and the installer with this
+      # certificate (base64 .pfx or https link in WIN_CSC_LINK). The secrets exist only in this step.
+      - name: Build Windows installer (signed)
+        if: env.HAS_SIGNING_CERT == 'true'
+        run: npm run dist
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+
+      # Reports the Authenticode status of what is published. A configured certificate must produce
+      # valid signatures; repository variable REQUIRE_CODE_SIGNING=true refuses unsigned releases.
+      - name: Check code signature
+        shell: pwsh
+        run: |
+          $require = $env:HAS_SIGNING_CERT -eq 'true' -or '${{ vars.REQUIRE_CODE_SIGNING }}' -eq 'true'
+          ./scripts/ci/check-signature.ps1 -Require:$require
 
       - name: Determine release tag
         id: tag

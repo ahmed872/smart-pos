@@ -41,6 +41,11 @@ jobs:
             if ($out -notmatch [regex]::Escape($line)) { throw "fuse check failed: $line" }
           }
 
+      # Report only: verification builds are never signed (see docs/CODE_SIGNING.md).
+      - name: Code signature status
+        shell: pwsh
+        run: ./scripts/ci/check-signature.ps1
+
       - name: Upload installer for manual testing
         uses: actions/upload-artifact@v4
         with:
