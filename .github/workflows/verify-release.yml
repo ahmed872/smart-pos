@@ -57,7 +57,9 @@ jobs:
           $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Cashier System.exe' | Select-Object -First 1
           $ver = $exe.VersionInfo.ProductVersion
           Write-Host "installed $($exe.FullName) version $ver"
-          if ($ver -ne (node -p "require('./package.json').version")) { throw "installed version $ver does not match ${{ inputs.tag }}" }
+          # Windows file versions have four parts (1.2.0 -> 1.2.0.0).
+          $expected = (node -p "require('./package.json').version")
+          if ($ver -ne $expected -and $ver -ne "$expected.0") { throw "installed version $ver does not match ${{ inputs.tag }}" }
           $out = npx @electron/fuses read --app $exe.FullName | Out-String
           Write-Host $out
           foreach ($line in @('RunAsNode is Disabled', 'EnableNodeOptionsEnvironmentVariable is Disabled',
