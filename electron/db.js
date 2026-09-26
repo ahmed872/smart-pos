@@ -73,12 +73,22 @@ const SETTING_DEFAULTS = {
 const insertMissingSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
 for (const [key, value] of Object.entries(SETTING_DEFAULTS)) insertMissingSetting.run(key, value);
 
+// ---------- Money ----------
+// Amounts are kept in the currency's minor unit precision (2 decimals, as printed on every
+// invoice and report), so what the database adds up is exactly what customers were shown and paid.
+// toPrecision(12) first removes binary noise (3 * 1.005 = 3.0149999999999997 is 3.015), so
+// halves round up the way they do on paper.
+function roundMoney(amount) {
+  return Math.round(Number((Number(amount) * 100).toPrecision(12))) / 100;
+}
+
 // ---------- Financial model (single source for reports and daily closing) ----------
-// Per invoice: taxable = subtotal - discount, tax = taxable * rate, total = taxable + tax.
+// Per invoice: taxable = subtotal - discount, tax = taxable * rate, total = taxable + tax,
+// each rounded to the currency precision (line totals too, and subtotal = sum of line totals).
 // Revenue excludes tax (tax is collected for the authority): revenue = total - tax. Using
 // total - tax instead of subtotal - discount also stays correct for invoices recorded before the
 // discount was capped at the subtotal. Profit = net revenue - net cost, i.e. before tax.
-// A return reverses qty * unit_price minus its discount share plus its tax share.
+// A return reverses its share of the line total minus its discount share plus its tax share.
 // Sales are attributed to their invoice date and returns to the date they were recorded.
 function periodTotals(fromTs, toTs) {
   // Invoice-level amounts come only from the sales table (never joined to its items), so each
@@ -362,7 +372,7 @@ module.exports = {
     if (!Array.isArray(payload.items) || payload.items.length === 0) throw new v.ValidationError('الفاتورة فارغة');
     if (payload.items.length > 1000) throw new v.ValidationError('عدد الأصناف كبير جدًا');
     const paymentMethod = v.oneOf(payload.paymentMethod ?? 'cash', 'طريقة الدفع', ['cash', 'card']);
-    const discount = v.nonNegativeNumber(payload.discount ?? 0, 'الخصم');
+    const discount = roundMoney(v.nonNegativeNumber(payload.discount ?? 0, 'الخصم'));
     // Same interpretation as the POS screen: a blank/non-numeric stored rate means 0%.
     const taxPercent = Number(this.getSettings().tax_percent) || 0;
     if (taxPercent < 0 || taxPercent > 100) {
@@ -385,15 +395,16 @@ module.exports = {
         name: product.name,
         qty,
         unit_price: product.price,
+        line_total: roundMoney(qty * product.price),
         is_kitchen_item: product.category_is_kitchen ? 1 : 0,
       };
     });
 
-    const subtotal = items.reduce((sum, it) => sum + it.qty * it.unit_price, 0);
+    const subtotal = roundMoney(items.reduce((sum, it) => sum + it.line_total, 0));
     if (discount > subtotal) throw new v.ValidationError('الخصم لا يمكن أن يكون أكبر من إجمالي الفاتورة');
-    const taxable = subtotal - discount;
-    const tax = taxable * (taxPercent / 100);
-    const total = taxable + tax;
+    const taxable = roundMoney(subtotal - discount);
+    const tax = roundMoney(taxable * (taxPercent / 100));
+    const total = roundMoney(taxable + tax);
     const customerId = null;
     const hasKitchenItems = items.some((it) => it.is_kitchen_item);
 
@@ -432,7 +443,7 @@ module.exports = {
 
         const unitCost = it.product_id ? (getProductCost.get(it.product_id)?.cost || 0) : 0;
         insertItem.run(saleId, it.product_id || null, it.name, it.qty, it.unit_price, unitCost,
-          it.qty * it.unit_price, it.is_kitchen_item ? 1 : 0);
+          it.line_total, it.is_kitchen_item ? 1 : 0);
         if (it.product_id) {
           decrementStock.run(it.qty, it.product_id);
           insertMovement.run(it.product_id, -it.qty);
@@ -517,13 +528,27 @@ module.exports = {
 
     // The returned goods carry their proportional share of the invoice discount and tax, so a
     // refund reverses exactly what the customer paid for them (see periodTotals for the model).
+    // Shares are rounded on the running total of everything returned from this invoice: each
+    // refund is the rounded cumulative amount after it minus the one before it, so partial
+    // refunds never add up to more (or less) than the invoice total when everything is returned.
     const sale = db.prepare('SELECT subtotal, tax, total FROM sales WHERE id = ?').get(saleId);
-    const lineGross = qty * item.unit_price;
-    const fraction = sale && sale.subtotal > 0 ? lineGross / sale.subtotal : 0;
     const effectiveDiscount = sale ? Math.max(sale.subtotal - (sale.total - sale.tax), 0) : 0;
-    const discountShare = effectiveDiscount * fraction;
-    const taxShare = (sale ? sale.tax : 0) * fraction;
-    const refundedAmount = lineGross - discountShare + taxShare;
+    const returnedGross = db.prepare(`
+      SELECT COALESCE(SUM(r.qty * si.line_total / si.qty), 0) AS gross
+      FROM returns r JOIN sale_items si ON si.id = r.sale_item_id
+      WHERE r.sale_id = ?
+    `).get(saleId).gross;
+    const cumulative = (gross) => {
+      const fraction = sale && sale.subtotal > 0 ? gross / sale.subtotal : 0;
+      const discountPart = roundMoney(effectiveDiscount * fraction);
+      const taxPart = roundMoney((sale ? sale.tax : 0) * fraction);
+      return { discountPart, taxPart, amount: roundMoney(gross) - discountPart + taxPart };
+    };
+    const before = cumulative(returnedGross);
+    const after = cumulative(returnedGross + qty * (item.line_total / item.qty));
+    const discountShare = roundMoney(after.discountPart - before.discountPart);
+    const taxShare = roundMoney(after.taxPart - before.taxPart);
+    const refundedAmount = roundMoney(after.amount - before.amount);
 
     const insertReturn = db.prepare(`
       INSERT INTO returns (sale_id, sale_item_id, product_id, qty, refunded_amount, discount_share, tax_share, reason, user_id)
