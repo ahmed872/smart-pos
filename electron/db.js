@@ -82,6 +82,12 @@ function roundMoney(amount) {
   return Math.round(Number((Number(amount) * 100).toPrecision(12))) / 100;
 }
 
+// Quantities (stock, sold, returned) keep 3 decimals, enough for weighed goods, so repeated
+// additions such as 0.1 + 0.2 never leave binary noise that blocks a sale or a return.
+function roundQty(qty) {
+  return Math.round(Number((Number(qty) * 1000).toPrecision(12))) / 1000;
+}
+
 // ---------- Financial model (single source for reports and daily closing) ----------
 // Per invoice: taxable = subtotal - discount, tax = taxable * rate, total = taxable + tax,
 // each rounded to the currency precision (line totals too, and subtotal = sum of line totals).
@@ -188,12 +194,23 @@ function currentPeriodKey() {
   return null;
 }
 
+// Next number in the current numbering scheme. Only numbers of exactly this scheme count: with
+// "never" (prefix 'INV-') a monthly number like 'INV-202609-000003' must not be read as 202609.
+// The existence check keeps a sale from ever failing on a duplicate number after the scheme was
+// switched back and forth.
 function nextSaleNumber() {
   const periodKey = currentPeriodKey();
   const prefix = periodKey ? `INV-${periodKey}-` : 'INV-';
-  const row = db.prepare(`SELECT sale_number FROM sales WHERE sale_number LIKE ? ORDER BY id DESC LIMIT 1`).get(prefix + '%');
-  const lastNum = row ? parseInt(row.sale_number.slice(prefix.length), 10) || 0 : 0;
-  return prefix + String(lastNum + 1).padStart(6, '0');
+  const start = prefix.length + 1;
+  const row = db.prepare(`
+    SELECT sale_number FROM sales
+    WHERE sale_number GLOB ? AND substr(sale_number, ?) <> '' AND substr(sale_number, ?) NOT GLOB '*[^0-9]*'
+    ORDER BY id DESC LIMIT 1
+  `).get(prefix + '*', start, start);
+  let n = row ? Number(row.sale_number.slice(prefix.length)) + 1 : 1;
+  const taken = db.prepare('SELECT 1 FROM sales WHERE sale_number = ?');
+  while (taken.get(prefix + String(n).padStart(6, '0'))) n += 1;
+  return prefix + String(n).padStart(6, '0');
 }
 
 module.exports = {
@@ -322,39 +339,56 @@ module.exports = {
     `).all();
   },
 
+  // On update, stock_qty is optional: when it is not sent the stock is left as it is, so editing a
+  // product (e.g. its price) never overwrites sales and returns recorded since the form was opened.
+  // Every stock change made here is recorded in stock_movements as an 'adjustment'.
   saveProduct(product) {
     if (!product || typeof product !== 'object') throw new v.ValidationError('بيانات المنتج غير صالحة');
+    const stockGiven = product.stock_qty !== undefined;
     const p = {
       name: v.requiredText(product.name, 'اسم المنتج'),
       barcode: v.optionalText(product.barcode, 'الباركود', 100),
       categoryId: v.optionalId(product.category_id, 'الفئة'),
-      price: v.nonNegativeNumber(product.price, 'السعر'),
-      cost: v.nonNegativeNumber(product.cost ?? 0, 'التكلفة'),
-      stockQty: v.nonNegativeNumber(product.stock_qty ?? 0, 'الكمية بالمخزون'),
+      price: v.amount(product.price, 'السعر'),
+      cost: v.amount(product.cost ?? 0, 'التكلفة'),
+      stockQty: v.stockQuantity(product.stock_qty ?? 0, 'الكمية بالمخزون'),
       trackStock: product.track_stock ? 1 : 0,
       image: v.optionalImageDataUrl(product.image_data_url, 'صورة المنتج'),
     };
     if (p.categoryId && !db.prepare('SELECT 1 FROM categories WHERE id = ?').get(p.categoryId)) {
       throw new v.ValidationError('الفئة غير موجودة');
     }
-    if (product.id) {
-      const id = v.positiveId(product.id, 'المنتج');
-      const info = db.prepare(`
-        UPDATE products SET name=?, barcode=?, category_id=?, price=?, cost=?, stock_qty=?, track_stock=?, image_data_url=?
-        WHERE id=?
-      `).run(p.name, p.barcode, p.categoryId, p.price, p.cost, p.stockQty, p.trackStock, p.image, id);
-      if (info.changes === 0) throw new v.ValidationError('المنتج غير موجود');
-      return id;
-    }
-    const info = db.prepare(`
-      INSERT INTO products (name, barcode, category_id, price, cost, stock_qty, track_stock, image_data_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(p.name, p.barcode, p.categoryId, p.price, p.cost, p.stockQty, p.trackStock, p.image);
-    return info.lastInsertRowid;
+    const id = product.id ? v.positiveId(product.id, 'المنتج') : null;
+    const recordAdjustment = db.prepare("INSERT INTO stock_movements (product_id, change_qty, reason) VALUES (?, ?, 'adjustment')");
+    return db.transaction(() => {
+      // A deleted product no longer holds on to its barcode.
+      if (p.barcode) {
+        db.prepare('UPDATE products SET barcode = NULL WHERE barcode = ? AND is_active = 0 AND id IS NOT ?').run(p.barcode, id);
+      }
+      if (id) {
+        const existing = db.prepare('SELECT stock_qty FROM products WHERE id = ?').get(id);
+        if (!existing) throw new v.ValidationError('المنتج غير موجود');
+        const stockQty = stockGiven ? p.stockQty : existing.stock_qty;
+        db.prepare(`
+          UPDATE products SET name=?, barcode=?, category_id=?, price=?, cost=?, stock_qty=?, track_stock=?, image_data_url=?
+          WHERE id=?
+        `).run(p.name, p.barcode, p.categoryId, p.price, p.cost, stockQty, p.trackStock, p.image, id);
+        if (stockQty !== existing.stock_qty) recordAdjustment.run(id, roundQty(stockQty - existing.stock_qty));
+        return id;
+      }
+      const newId = db.prepare(`
+        INSERT INTO products (name, barcode, category_id, price, cost, stock_qty, track_stock, image_data_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(p.name, p.barcode, p.categoryId, p.price, p.cost, p.stockQty, p.trackStock, p.image).lastInsertRowid;
+      if (p.stockQty !== 0) recordAdjustment.run(newId, p.stockQty);
+      return newId;
+    })();
   },
 
+  // Products are only deactivated (sales keep referring to them); the barcode is released so it
+  // can be given to a new product.
   deleteProduct(id) {
-    db.prepare('UPDATE products SET is_active = 0 WHERE id = ?').run(v.positiveId(id, 'المنتج'));
+    db.prepare('UPDATE products SET is_active = 0, barcode = NULL WHERE id = ?').run(v.positiveId(id, 'المنتج'));
   },
 
   saveCategory(name, isKitchen) {
@@ -372,7 +406,7 @@ module.exports = {
     if (!Array.isArray(payload.items) || payload.items.length === 0) throw new v.ValidationError('الفاتورة فارغة');
     if (payload.items.length > 1000) throw new v.ValidationError('عدد الأصناف كبير جدًا');
     const paymentMethod = v.oneOf(payload.paymentMethod ?? 'cash', 'طريقة الدفع', ['cash', 'card']);
-    const discount = roundMoney(v.nonNegativeNumber(payload.discount ?? 0, 'الخصم'));
+    const discount = roundMoney(v.amount(payload.discount ?? 0, 'الخصم'));
     // Same interpretation as the POS screen: a blank/non-numeric stored rate means 0%.
     const taxPercent = Number(this.getSettings().tax_percent) || 0;
     if (taxPercent < 0 || taxPercent > 100) {
@@ -387,7 +421,8 @@ module.exports = {
     const items = payload.items.map((raw) => {
       if (!raw || typeof raw !== 'object') throw new v.ValidationError('صنف غير صالح في الفاتورة');
       const productId = v.positiveId(raw.product_id, 'المنتج');
-      const qty = v.positiveNumber(raw.qty, 'الكمية');
+      const qty = roundQty(v.quantity(raw.qty, 'الكمية'));
+      if (qty <= 0) throw new v.ValidationError('الكمية: يجب أن تكون أكبر من صفر');
       const product = getProductForSale.get(productId);
       if (!product || !product.is_active) throw new v.ValidationError('منتج غير موجود في الفاتورة');
       return {
@@ -419,7 +454,7 @@ module.exports = {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const decrementStock = db.prepare(`
-      UPDATE products SET stock_qty = stock_qty - ? WHERE id = ? AND track_stock = 1
+      UPDATE products SET stock_qty = ROUND(stock_qty - ?, 3) WHERE id = ? AND track_stock = 1
     `);
     const insertMovement = db.prepare(`
       INSERT INTO stock_movements (product_id, change_qty, reason) VALUES (?, ?, 'sale')
@@ -508,7 +543,7 @@ module.exports = {
   createReturn(payload) {
     if (!payload || typeof payload !== 'object') throw new v.ValidationError('بيانات الإرجاع غير صالحة');
     const saleItemId = v.positiveId(payload.saleItemId, 'صنف الفاتورة');
-    const qty = v.positiveNumber(payload.qty, 'الكمية المطلوب إرجاعها');
+    const qty = roundQty(v.quantity(payload.qty, 'الكمية المطلوب إرجاعها'));
     const reason = v.optionalText(payload.reason, 'سبب الإرجاع', 500);
     const { userId } = payload;
     const item = db.prepare('SELECT * FROM sale_items WHERE id = ?').get(saleItemId);
@@ -521,7 +556,7 @@ module.exports = {
     const alreadyReturned = db.prepare(
       'SELECT COALESCE(SUM(qty), 0) AS q FROM returns WHERE sale_item_id = ?'
     ).get(saleItemId).q;
-    const availableToReturn = item.qty - alreadyReturned;
+    const availableToReturn = roundQty(item.qty - alreadyReturned);
     if (qty <= 0 || qty > availableToReturn) {
       throw new Error('الكمية المطلوب إرجاعها غير صحيحة');
     }
@@ -555,7 +590,7 @@ module.exports = {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const restoreStock = db.prepare(`
-      UPDATE products SET stock_qty = stock_qty + ? WHERE id = ? AND track_stock = 1
+      UPDATE products SET stock_qty = ROUND(stock_qty + ?, 3) WHERE id = ? AND track_stock = 1
     `);
     const insertMovement = db.prepare(`
       INSERT INTO stock_movements (product_id, change_qty, reason) VALUES (?, ?, 'return')

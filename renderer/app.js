@@ -7,6 +7,7 @@ let cart = []; // { product_id, name, qty, unit_price, is_kitchen_item }
 let settings = {};
 let currentUser = null;
 let editingProductId = null;
+let loadedStockValue = null; // stock shown when a product was loaded into the edit form
 let pendingProductImage = null;
 
 async function init() {
@@ -434,6 +435,7 @@ function loadProductIntoForm(product) {
   document.getElementById('pPrice').value = product.price;
   document.getElementById('pCost').value = product.cost;
   document.getElementById('pStock').value = product.stock_qty;
+  loadedStockValue = document.getElementById('pStock').value;
   document.getElementById('pTrackStock').checked = !!product.track_stock;
   document.getElementById('cancelEditBtn').style.display = 'block';
   pendingProductImage = product.image_data_url || null;
@@ -444,6 +446,7 @@ function loadProductIntoForm(product) {
 
 function resetProductForm() {
   editingProductId = null;
+  loadedStockValue = null;
   document.getElementById('productFormTitle').textContent = 'إضافة منتج جديد';
   document.getElementById('pName').value = '';
   document.getElementById('pBarcode').value = '';
@@ -483,7 +486,11 @@ function setupProductHandlers() {
         category_id: Number(document.getElementById('pCategory').value) || null,
         price: Number(document.getElementById('pPrice').value) || 0,
         cost: Number(document.getElementById('pCost').value) || 0,
-        stock_qty: Number(document.getElementById('pStock').value) || 0,
+        // When editing, the stock is only sent if it was changed here, so sales made since the
+        // form was opened are never overwritten by the stock shown in the form.
+        ...(editingProductId && document.getElementById('pStock').value === loadedStockValue
+          ? {}
+          : { stock_qty: Number(document.getElementById('pStock').value) || 0 }),
         track_stock: document.getElementById('pTrackStock').checked,
         image_data_url: pendingProductImage,
       });

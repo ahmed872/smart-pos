@@ -37,6 +37,30 @@ function numberInRange(value, label, min, max) {
   return n;
 }
 
+// Upper bounds keep a mistyped or hostile value (1e308, 1e20) from turning into Infinity or
+// absurd totals that poison every report.
+const MAX_AMOUNT = 1e9; // prices, costs, discounts
+const MAX_QUANTITY = 1e6; // quantity of one invoice line or one return
+const MAX_STOCK = 1e9;
+
+function amount(value, label) {
+  const n = nonNegativeNumber(value, label);
+  if (n > MAX_AMOUNT) fail(`${label}: يجب ألا تزيد عن ${MAX_AMOUNT.toLocaleString('en-US')}`);
+  return n;
+}
+
+function quantity(value, label) {
+  const n = positiveNumber(value, label);
+  if (n > MAX_QUANTITY) fail(`${label}: يجب ألا تزيد عن ${MAX_QUANTITY.toLocaleString('en-US')}`);
+  return n;
+}
+
+function stockQuantity(value, label) {
+  const n = nonNegativeNumber(value, label);
+  if (n > MAX_STOCK) fail(`${label}: يجب ألا تزيد عن ${MAX_STOCK.toLocaleString('en-US')}`);
+  return n;
+}
+
 function positiveId(value, label = 'المعرف') {
   const n = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
   if (!Number.isSafeInteger(n) || n <= 0) fail(`${label}: غير صالح`);
@@ -48,10 +72,16 @@ function optionalId(value, label) {
   return positiveId(value, label);
 }
 
+// Text printed on receipts/reports: one line, no control characters and no bidi override/isolate
+// characters (they can reorder or hide the surrounding printed text). HTML is escaped at render.
+const DISALLOWED_DISPLAY_CHARS = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
+
+// Names (products, categories, users), barcodes and reasons follow the same single-line rule.
 function requiredText(value, label, maxLength = 200) {
   if (typeof value !== 'string' || value.trim() === '') fail(`${label} مطلوب`);
   const text = value.trim();
   if (text.length > maxLength) fail(`${label}: طويل جدًا`);
+  if (DISALLOWED_DISPLAY_CHARS.test(text)) fail(`${label}: يحتوي على رموز غير مسموحة`);
   return text;
 }
 
@@ -60,12 +90,9 @@ function optionalText(value, label, maxLength = 200) {
   if (typeof value !== 'string') fail(`${label}: غير صالح`);
   const text = value.trim();
   if (text.length > maxLength) fail(`${label}: طويل جدًا`);
+  if (DISALLOWED_DISPLAY_CHARS.test(text)) fail(`${label}: يحتوي على رموز غير مسموحة`);
   return text === '' ? null : text;
 }
-
-// Text printed on receipts/reports: one line, no control characters and no bidi override/isolate
-// characters (they can reorder or hide the surrounding printed text). HTML is escaped at render.
-const DISALLOWED_DISPLAY_CHARS = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
 
 function displayText(value, label, maxLength) {
   if (value === null || value === undefined) return '';
@@ -115,6 +142,9 @@ module.exports = {
   nonNegativeNumber,
   positiveNumber,
   numberInRange,
+  amount,
+  quantity,
+  stockQuantity,
   positiveId,
   optionalId,
   requiredText,
