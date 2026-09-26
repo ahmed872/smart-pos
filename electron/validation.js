@@ -103,6 +103,15 @@ function displayText(value, label, maxLength) {
   return text;
 }
 
+// Multi-line text (the invoice QR payload): line breaks allowed, other control and bidi
+// override characters are not.
+function multilineText(value, label, maxLength) {
+  if (typeof value !== 'string' || value.trim() === '') fail(`${label} مطلوب`);
+  if (value.length > maxLength) fail(`${label}: طويل جدًا`);
+  if (DISALLOWED_DISPLAY_CHARS.test(value.replace(/\r?\n/g, ''))) fail(`${label}: يحتوي على رموز غير مسموحة`);
+  return value;
+}
+
 // Phone numbers and registration numbers: digits (Latin or Arabic-Indic), Latin letters and a few
 // separators only.
 function identifierText(value, label, maxLength, pattern) {
@@ -151,6 +160,7 @@ module.exports = {
   optionalText,
   oneOf,
   displayText,
+  multilineText,
   identifierText,
   PHONE_RE,
   REGISTRATION_RE,

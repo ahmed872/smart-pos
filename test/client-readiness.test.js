@@ -218,3 +218,14 @@ test('F4: uploaded product photos and logos are resized before they are stored',
   assert.match(src, /readImageFile\(file, \{ maxSize: 600, type: 'image\/png' \}\)/);
   assert.ok(!/reader\.onload = \(\) => \{\s*pending(ProductImage|DataUrl) = reader\.result/.test(src), 'no raw file is stored');
 });
+
+test('F17 follow-up: the multi-line invoice QR text is still accepted (line breaks only)', async () => {
+  const { ctx, c } = await admin();
+  const SI = require('../renderer/store-identity.js');
+  const text = SI.invoiceQrText({ sale_number: 'INV-000001', created_at: '2026-09-26 10:00:00', total: 10, tax: 1 }, { store_name: 'متجر', tax_number: '123' });
+  assert.ok(text.includes('\n'));
+  assert.match(await c('print:qr', text), /^data:image\/png;base64,/);
+  await assert.rejects(c('print:qr', 'a‮b'), /يحتوي على رموز غير مسموحة/);
+  await assert.rejects(c('print:qr', 'x'.repeat(501)), /طويل جدًا/);
+  shutdown(ctx);
+});

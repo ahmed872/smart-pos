@@ -469,7 +469,7 @@ function registerIpcHandlers() {
   handle('print:receipt', Access.USER, (_user, saleId) => printReceipt(v.positiveId(saleId, 'الفاتورة')));
   handle('print:dayClose', Access.USER, (_user, date) => printDayClose(v.dateString(date)));
   handle('print:qr', Access.USER, (_user, text) =>
-    QRCode.toDataURL(v.requiredText(text, 'النص', 500), { margin: 0, width: 140 }));
+    QRCode.toDataURL(v.multilineText(text, 'النص', 500), { margin: 0, width: 140 }));
 
   handle('app:info', Access.USER, () => ({ name: PRODUCT_NAME, version: app.getVersion() }));
 
