@@ -298,3 +298,163 @@ test('F16: cost prices and profit are not sent to cashiers or the kitchen screen
   assert.ok(!('unit_cost' in (await c('kitchen:list'))[0].items[0]));
   shutdown(ctx);
 });
+
+// ---------- Financial deep audit (multi-day, hand-computed) ----------
+
+test('Part 2: multi-day ledger - days add up, closing = report, returns land on their own day, stock = movements', async () => {
+  const { ctx, c } = await admin();
+  const db = ctx.store.db;
+  const P = await c('products:save', { name: 'P', price: 12.5, cost: 7.25, stock_qty: 100, track_stock: true });
+  const Q = await c('products:save', { name: 'Q', price: 3.99, cost: 1.1, stock_qty: 1000, track_stock: true });
+  const R = await c('products:save', { name: 'R', price: 250000, cost: 180000, stock_qty: 10, track_stock: true });
+  const at = (saleId, day) => db.prepare('UPDATE sales SET created_at = ? WHERE id = ?').run(`${day} 10:00:00`, saleId);
+  const D1 = '2026-01-10';
+  const D2 = '2026-01-11';
+
+  // Day 1 --------------------------------------------------------------
+  await c('settings:save', 'tax_percent', '0');
+  const s1 = await c('sales:create', { items: [{ product_id: P, qty: 2 }] }); // 25.00, no tax, no discount
+  at(s1.saleId, D1);
+  await c('settings:save', 'tax_percent', '14');
+  const s2 = await c('sales:create', { items: [{ product_id: P, qty: 3 }, { product_id: Q, qty: 7 }], discount: 5.5, paymentMethod: 'card' });
+  at(s2.saleId, D1);
+  // s2: 37.50 + 27.93 = 65.43; taxable 59.93; tax 8.3902 -> 8.39; total 68.32; cost 3*7.25 + 7*1.1 = 29.45
+  assert.deepEqual([s2.subtotal, s2.tax, s2.total], [65.43, 8.39, 68.32]);
+  const s3 = await c('sales:create', { items: [{ product_id: R, qty: 2 }], discount: 1000 }); // large values
+  at(s3.saleId, D1);
+  // s3: 500000; taxable 499000; tax 69860; total 568860; cost 360000
+
+  // Day 2: returns of day-1 sales and a new sale ---------------------------
+  const f2 = await c('sales:full', s2.saleId);
+  const r1 = await c('returns:create', { saleItemId: f2.items.find((i) => i.product_id === Q).id, qty: 3 });
+  // Q line 27.93 * 3/7 = 11.97 gross; fraction 11.97/65.43; discount 5.5 -> 1.01 (1.00619); tax 8.39 -> 1.53 (1.5349)
+  assert.deepEqual([r1.discountShare, r1.taxShare, r1.refundedAmount], [1.01, 1.53, 12.49]);
+  const f3 = await c('sales:full', s3.saleId);
+  const r2 = await c('returns:create', { saleItemId: f3.items[0].id, qty: 1 });
+  // half of s3: gross 250000, discount 500, tax 34930 -> refund 284430
+  assert.deepEqual([r2.discountShare, r2.taxShare, r2.refundedAmount], [500, 34930, 284430]);
+  db.prepare('UPDATE returns SET created_at = ?').run(`${D2} 09:00:00`);
+  const s4 = await c('sales:create', { items: [{ product_id: Q, qty: 10 }] }); // 39.90, tax 5.586 -> 5.59, total 45.49
+  at(s4.saleId, D2);
+  assert.deepEqual([s4.tax, s4.total], [5.59, 45.49]);
+
+  const day1 = await c('reports:summary', D1, D1);
+  const day2 = await c('reports:summary', D2, D2);
+  const both = await c('reports:summary', D1, D2);
+  const cents = (n) => Math.round(n * 100);
+  // Day 1 by hand
+  assert.deepEqual([day1.invoiceCount, cents(day1.grossSales), cents(day1.totalDiscount), cents(day1.totalTax), cents(day1.salesTotal),
+    cents(day1.cash), cents(day1.card), day1.returnsCount, cents(day1.totalCost), cents(day1.profit)],
+  [3, cents(25 + 65.43 + 500000), cents(5.5 + 1000), cents(8.39 + 69860), cents(25 + 68.32 + 568860),
+    cents(25 + 568860), cents(68.32), 0, cents(14.5 + 29.45 + 360000), cents((25 + 59.93 + 499000) - (14.5 + 29.45 + 360000))]);
+  // Day 2 by hand: one sale, two returns of day-1 invoices
+  assert.deepEqual([day2.invoiceCount, cents(day2.salesTotal), day2.returnsCount, cents(day2.totalReturns), cents(day2.returnsTax),
+    cents(day2.netSales), cents(day2.totalCost), cents(day2.profit)],
+  [1, cents(45.49), 2, cents(12.49 + 284430), cents(1.53 + 34930),
+    cents(39.9 - (12.49 - 1.53) - (284430 - 34930)), cents(10 * 1.1 - 3 * 1.1 - 180000),
+    cents((39.9 - (12.49 - 1.53) - (284430 - 34930)) - (10 * 1.1 - 3 * 1.1 - 180000))]);
+  // Days add up; each day's closing is the same numbers as its report
+  for (const k of ['invoiceCount', 'grossSales', 'totalDiscount', 'totalTax', 'salesTotal', 'cash', 'card', 'returnsCount',
+    'totalReturns', 'returnsTax', 'netSales', 'netTax', 'netTotal', 'totalCost', 'profit']) {
+    assert.equal(cents(both[k]), cents(day1[k]) + cents(day2[k]), `${k}: D1..D2 = D1 + D2`);
+  }
+  for (const [day, rep] of [[D1, day1], [D2, day2]]) {
+    const close = await c('reports:dailyClosing', day);
+    for (const k of ['salesTotal', 'netTotal', 'cash', 'card', 'totalReturns', 'profit']) assert.equal(cents(close[k]), cents(rep[k]), `${day} ${k}`);
+    assert.equal(cents(rep.netTotal), cents(rep.netSales + rep.netTax));
+  }
+  // Inventory: current stock = initial + all recorded movements, and matches sales/returns by hand
+  const stock = Object.fromEntries((await c('products:list')).map((p) => [p.name, p.stock_qty]));
+  assert.deepEqual(stock, { P: 95, Q: 1000 - 7 + 3 - 10, R: 9 });
+  for (const id of [P, Q, R]) {
+    const moved = db.prepare('SELECT SUM(change_qty) AS s FROM stock_movements WHERE product_id = ?').get(id).s;
+    const cur = db.prepare('SELECT stock_qty FROM products WHERE id = ?').get(id).stock_qty;
+    assert.equal(moved, cur, `product ${id}: stock equals the sum of its movements`);
+  }
+  // Empty period
+  const empty = await c('reports:summary', '2025-01-01', '2025-01-31');
+  assert.ok(Object.entries(empty).every(([k, val]) => (k === 'topProducts' ? val.length === 0 : val === 0)));
+  shutdown(ctx);
+});
+
+// ---------- Data integrity ----------
+
+test('Part 3: an unexpected database failure mid-sale or mid-return leaves no partial data', async () => {
+  const { ctx, c } = await admin();
+  const db = ctx.store.db;
+  const A = await c('products:save', { name: 'A', price: 5, stock_qty: 10, track_stock: true });
+  const B = await c('products:save', { name: 'B', price: 7, stock_qty: 10, track_stock: true });
+  const ok = await c('sales:create', { items: [{ product_id: A, qty: 1 }, { product_id: B, qty: 1 }] });
+  const snapshot = () => JSON.stringify(['sales', 'sale_items', 'returns', 'stock_movements', 'products']
+    .map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY id`).all()));
+  const before = snapshot();
+  // simulate a disk/database error on the second line's stock movement
+  db.exec(`CREATE TRIGGER fail_b AFTER INSERT ON stock_movements WHEN NEW.product_id = ${B}
+           BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END`);
+  const logged = [];
+  const orig = console.error;
+  console.error = (...a) => logged.push(a.join(' '));
+  try {
+    await assert.rejects(c('sales:create', { items: [{ product_id: A, qty: 2 }, { product_id: B, qty: 2 }] }), /^Error: حدث خطأ غير متوقع/);
+    const line = (await c('sales:full', ok.saleId)).items.find((i) => i.product_id === B);
+    await assert.rejects(c('returns:create', { saleItemId: line.id, qty: 1 }), /حدث خطأ غير متوقع/);
+  } finally {
+    console.error = orig;
+    db.exec('DROP TRIGGER fail_b');
+  }
+  assert.equal(snapshot(), before, 'sales, items, returns, stock and movements unchanged');
+  assert.ok(logged.some((l) => l.includes('simulated disk failure')), 'the technical cause is logged for support');
+  // and the POS keeps working afterwards
+  assert.ok((await c('sales:create', { items: [{ product_id: B, qty: 1 }] })).saleId > ok.saleId);
+  shutdown(ctx);
+});
+
+// ---------- Backup / restore ----------
+
+test('Part 4: backup -> changes -> restore brings back every table exactly; bad files never touch live data', async () => {
+  const path = require('node:path');
+  const fs = require('node:fs');
+  const { home, ctx, c } = await admin({ storeName: 'متجر النسخ', currency: 'ج.م' });
+  const LOGO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await c('settings:saveMany', { tax_percent: '14', store_address: 'شارع 1', store_phone: '0100', tax_number: '9-9', logo_data_url: LOGO });
+  const cat = await c('categories:save', 'مشروبات', true);
+  const ids = [];
+  for (let i = 0; i < 20; i++) ids.push(await c('products:save', { name: `منتج ${i}`, barcode: `B${i}`, category_id: i % 2 ? cat : null, price: 1.25 * (i + 1), cost: i, stock_qty: 50, track_stock: i % 3 !== 0 }));
+  await c('users:save', { username: 'k1', pin: 'kash-111', role: 'cashier' });
+  for (let i = 0; i < 30; i++) {
+    const s = await c('sales:create', { items: [{ product_id: ids[i % 20], qty: 1 + (i % 3) }, { product_id: ids[(i * 7) % 20], qty: 1 }], discount: i % 4, paymentMethod: i % 2 ? 'card' : 'cash' });
+    if (i % 5 === 0) await c('returns:create', { saleItemId: (await c('sales:full', s.saleId)).items[0].id, qty: 1 });
+  }
+  const tables = ['categories', 'products', 'users', 'sales', 'sale_items', 'returns', 'stock_movements', 'settings'];
+  const dump = (db) => JSON.stringify(tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()));
+  const original = dump(ctx.store.db);
+  const backupFile = path.join(home, 'store.db');
+  ctx.dialogQueue.save.push({ canceled: false, filePath: backupFile });
+  await c('backup:create');
+  // life goes on after the backup
+  await c('sales:create', { items: [{ product_id: ids[1], qty: 1 }] });
+  await c('products:save', { name: 'بعد النسخة', price: 1 });
+  await c('settings:save', 'store_name', 'اسم آخر');
+  const afterChanges = dump(ctx.store.db);
+  // rejected files: live data untouched
+  const bad = {
+    'random.db': Buffer.concat([Buffer.from('SQLite format 3\0', 'latin1'), Buffer.alloc(4096, 0x5a)]),
+    'truncated.db': fs.readFileSync(backupFile).subarray(0, 8192),
+    'text.db': Buffer.from('not a database at all '.repeat(100)),
+  };
+  for (const [name, bytes] of Object.entries(bad)) {
+    fs.writeFileSync(path.join(home, name), bytes);
+    ctx.dialogQueue.open.push({ canceled: false, filePaths: [path.join(home, name)] });
+    assert.equal(await c('backup:restore'), false, name);
+    assert.equal(dump(ctx.store.db), afterChanges, `${name}: live data unchanged`);
+  }
+  // restore the real backup
+  ctx.dialogQueue.open.push({ canceled: false, filePaths: [backupFile] });
+  ctx.dialogQueue.message.push({ response: 1 });
+  assert.equal(await c('backup:restore'), true);
+  const again = await boot({ home });
+  assert.equal(dump(again.store.db), original, 'every row of every table is back, byte for byte');
+  await again.call('auth:login', 'k1', 'kash-111');
+  assert.equal((await again.call('auth:me')).role, 'cashier', 'employees and PINs restored');
+  shutdown(again);
+});
