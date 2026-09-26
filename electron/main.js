@@ -411,9 +411,56 @@ function handle(channel, access, fn) {
   });
 }
 
+// ---------- Login throttling ----------
+// After 5 wrong PINs in a row for a username, that username cannot log in for 30 seconds, so a
+// PIN cannot be found by trying values quickly at the login screen.
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_LOCK_MS = 30 * 1000;
+const loginFailures = new Map(); // normalized username -> { count, lockedUntil }
+
+function loginKey(username) {
+  return typeof username === 'string' ? username.trim().toLowerCase() : '';
+}
+
+function assertLoginAllowed(username) {
+  const entry = loginFailures.get(loginKey(username));
+  if (entry && entry.lockedUntil > Date.now()) {
+    const seconds = Math.ceil((entry.lockedUntil - Date.now()) / 1000);
+    throw new AccessDeniedError(`تم إيقاف تسجيل الدخول لهذا المستخدم مؤقتًا بسبب تكرار الرقم السري الخاطئ. حاول مرة أخرى بعد ${seconds} ثانية.`);
+  }
+}
+
+function recordLoginResult(username, success) {
+  const key = loginKey(username);
+  if (success) {
+    loginFailures.delete(key);
+    return;
+  }
+  const entry = loginFailures.get(key) || { count: 0, lockedUntil: 0 };
+  entry.count += 1;
+  if (entry.count >= LOGIN_MAX_FAILURES) {
+    entry.count = 0;
+    entry.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+  }
+  loginFailures.set(key, entry);
+}
+
+// ---------- Management data ----------
+// Cost prices and profit are for the store's management: cashiers and the kitchen screen get the
+// same data without them.
+function isAdmin(user) {
+  return !!user && user.role === 'admin';
+}
+
+function withoutCost(rows, field) {
+  return rows.map(({ [field]: _hidden, ...rest }) => rest);
+}
+
 function registerIpcHandlers() {
   handle('auth:login', Access.PUBLIC, (_user, username, pin) => {
+    assertLoginAllowed(username);
     const user = store.verifyLogin(username, pin);
+    recordLoginResult(username, !!user);
     sessionUserId = user ? user.id : null;
     return user;
   });
@@ -437,20 +484,27 @@ function registerIpcHandlers() {
   handle('categories:list', Access.USER, () => store.getCategories());
   handle('categories:save', Access.ADMIN, (_user, name, isKitchen) => store.saveCategory(name, isKitchen));
 
-  handle('products:list', Access.USER, () => store.getProducts());
+  handle('products:list', Access.USER, (user) => (isAdmin(user) ? store.getProducts() : withoutCost(store.getProducts(), 'cost')));
   handle('products:save', Access.ADMIN, (_user, product) => store.saveProduct(product));
   handle('products:delete', Access.ADMIN, (_user, id) => store.deleteProduct(id));
 
   handle('sales:create', Access.USER, (user, payload) => store.createSale({ ...payload, userId: user.id }));
   handle('sales:list', Access.USER, (_user, limit) => store.getSales(limit));
   handle('sales:find', Access.USER, (_user, query) => store.findSales(query));
-  handle('sales:items', Access.USER, (_user, saleId) => store.getSaleItems(v.positiveId(saleId, 'الفاتورة')));
-  handle('sales:full', Access.USER, (_user, saleId) => store.getSaleFull(v.positiveId(saleId, 'الفاتورة')));
+  handle('sales:items', Access.USER, (user, saleId) => {
+    const items = store.getSaleItems(v.positiveId(saleId, 'الفاتورة'));
+    return isAdmin(user) ? items : withoutCost(items, 'unit_cost');
+  });
+  handle('sales:full', Access.USER, (user, saleId) => {
+    const full = store.getSaleFull(v.positiveId(saleId, 'الفاتورة'));
+    return full && !isAdmin(user) ? { ...full, items: withoutCost(full.items, 'unit_cost') } : full;
+  });
 
   handle('returns:create', Access.USER, (user, payload) => store.createReturn({ ...payload, userId: user.id }));
   handle('returns:forSale', Access.USER, (_user, saleId) => store.getReturnsForSale(v.positiveId(saleId, 'الفاتورة')));
 
-  handle('kitchen:list', Access.KITCHEN, () => store.getKitchenOrders());
+  handle('kitchen:list', Access.KITCHEN, () =>
+    store.getKitchenOrders().map((order) => ({ ...order, items: withoutCost(order.items, 'unit_cost') })));
   handle('kitchen:updateStatus', Access.KITCHEN, (_user, saleId, status) => store.updateKitchenStatus(saleId, status));
   handle('kitchen:openWindow', Access.USER, () => createKitchenWindow());
 
@@ -462,7 +516,12 @@ function registerIpcHandlers() {
     exportReportPdf(v.dateString(fromDate), v.dateString(toDate)));
   handle('reports:exportExcel', Access.ADMIN, (_user, fromDate, toDate) =>
     exportReportExcel(v.dateString(fromDate), v.dateString(toDate)));
-  handle('reports:dailyClosing', Access.USER, (_user, date) => store.getDailyClosing(v.dateString(date)));
+  handle('reports:dailyClosing', Access.USER, (user, date) => {
+    const closing = store.getDailyClosing(v.dateString(date));
+    if (isAdmin(user)) return closing;
+    const { totalCost: _cost, profit: _profit, ...forCashier } = closing;
+    return forCashier;
+  });
 
   handle('settings:get', Access.USER, () => store.getSettings());
   handle('settings:save', Access.ADMIN, (_user, key, value) => store.saveSetting(key, value));

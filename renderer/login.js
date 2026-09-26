@@ -21,7 +21,13 @@ async function attemptLogin() {
   const username = document.getElementById('username').value.trim();
   const pin = document.getElementById('pin').value.trim();
 
-  const user = await window.api.auth.login(username, pin);
+  let user;
+  try {
+    user = await window.api.auth.login(username, pin);
+  } catch (err) {
+    showError(errorText(err));
+    return;
+  }
   if (!user) {
     showError('اسم المستخدم أو الرقم السري غير صحيح');
     return;

@@ -260,3 +260,41 @@ test('F2/F11-F14: cashier screen guards (source checks backing the E2E run)', ()
   assert.ok(!/toISOString\(\)\.slice\(0, 10\)/.test(src), 'dates use local time');
   assert.match(src, /يجب أن يكون تاريخ البداية قبل تاريخ النهاية/);
 });
+
+// ---------- Security ----------
+
+test('F15: repeated wrong PINs lock that username for 30 seconds; other users are not affected', async (t) => {
+  const { ctx, c } = await admin();
+  await c('users:save', { username: 'k', pin: 'kash-111', role: 'cashier' });
+  for (let i = 0; i < 5; i++) assert.equal(await c('auth:login', 'k', `wrong-${i}`), null);
+  await assert.rejects(c('auth:login', 'k', 'kash-111'), /تم إيقاف تسجيل الدخول لهذا المستخدم مؤقتًا/);
+  await assert.rejects(c('auth:login', ' K ', 'kash-111'), /مؤقتًا/, 'same account, other spelling');
+  assert.equal((await c('auth:login', 'owner', PIN)).role, 'admin', 'the owner can still log in');
+  // after the lock expires the correct PIN works again and the counter starts over
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 31 * 1000 });
+  assert.equal((await c('auth:login', 'k', 'kash-111')).role, 'cashier');
+  for (let i = 0; i < 4; i++) assert.equal(await c('auth:login', 'k', `wrong-${i}`), null);
+  assert.equal((await c('auth:login', 'k', 'kash-111')).role, 'cashier', '4 failures do not lock');
+  t.mock.timers.reset();
+  shutdown(ctx);
+});
+
+test('F16: cost prices and profit are not sent to cashiers or the kitchen screen', async () => {
+  const { ctx, c } = await admin();
+  const kitchen = await c('categories:save', 'مطبخ', true);
+  const A = await c('products:save', { name: 'A', price: 10, cost: 6, category_id: kitchen });
+  const sale = await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
+  const d = await today(c);
+  assert.equal((await c('products:list'))[0].cost, 6, 'admin sees cost');
+  assert.equal((await c('reports:dailyClosing', d)).profit, 4, 'admin sees profit');
+  await c('users:save', { username: 'k', pin: 'kash-111', role: 'cashier' });
+  await c('auth:login', 'k', 'kash-111');
+  assert.ok(!('cost' in (await c('products:list'))[0]));
+  assert.ok(!('unit_cost' in (await c('sales:items', sale.saleId))[0]));
+  assert.ok(!('unit_cost' in (await c('sales:full', sale.saleId)).items[0]));
+  const closing = await c('reports:dailyClosing', d);
+  assert.ok(!('profit' in closing) && !('totalCost' in closing));
+  assert.equal(closing.netTotal, 10, 'the closing itself is complete');
+  assert.ok(!('unit_cost' in (await c('kitchen:list'))[0].items[0]));
+  shutdown(ctx);
+});
