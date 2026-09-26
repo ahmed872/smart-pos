@@ -419,6 +419,35 @@ async function refreshProductsTable() {
   });
 }
 
+// Photos are resized before they are stored: the product list (with its images) is reloaded
+// after every sale, so a few phone photos of several MB each would make the POS crawl.
+// Product images: JPEG on white, at most 256 px. Logo: PNG (keeps transparency), at most 600 px.
+function readImageFile(file, { maxSize, type }) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('تعذر قراءة الصورة'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('الملف المختار ليس صورة صالحة'));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const g = canvas.getContext('2d');
+        if (type === 'image/jpeg') {
+          g.fillStyle = '#ffffff';
+          g.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        g.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL(type, 0.85));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function renderProductImagePreview() {
   const box = document.getElementById('pImagePreview');
   box.innerHTML = pendingProductImage
@@ -464,15 +493,18 @@ function resetProductForm() {
 function setupProductHandlers() {
   renderProductImagePreview();
 
-  document.getElementById('pImageInput').addEventListener('change', () => {
-    const file = document.getElementById('pImageInput').files[0];
+  document.getElementById('pImageInput').addEventListener('change', async () => {
+    const input = document.getElementById('pImageInput');
+    const file = input.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      pendingProductImage = reader.result;
-      renderProductImagePreview();
-    };
-    reader.readAsDataURL(file);
+    try {
+      pendingProductImage = await readImageFile(file, { maxSize: 256, type: 'image/jpeg' });
+    } catch (err) {
+      input.value = '';
+      alert(userMessage(err));
+      return;
+    }
+    renderProductImagePreview();
   });
 
   document.getElementById('saveProductBtn').addEventListener('click', async () => {
@@ -706,15 +738,17 @@ function setupLogoHandlers() {
   const previewBox = document.getElementById('logoPreviewBox');
   let pendingDataUrl = null;
 
-  fileInput.addEventListener('change', () => {
+  fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      pendingDataUrl = reader.result;
-      previewBox.innerHTML = `<img src="${pendingDataUrl}" style="max-height:70px;" />`;
-    };
-    reader.readAsDataURL(file);
+    try {
+      pendingDataUrl = await readImageFile(file, { maxSize: 600, type: 'image/png' });
+    } catch (err) {
+      fileInput.value = '';
+      alert(userMessage(err));
+      return;
+    }
+    previewBox.innerHTML = `<img src="${pendingDataUrl}" style="max-height:70px;" />`;
   });
 
   document.getElementById('saveLogoBtn').addEventListener('click', async () => {

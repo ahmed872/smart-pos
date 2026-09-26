@@ -615,16 +615,21 @@ module.exports = {
   },
 
   // ---------- Kitchen ----------
+  // Open kitchen orders from the last 24 hours (older unfinished orders are stale and would pile
+  // up forever in a shop that does not use the kitchen screen). Items come from one query instead
+  // of one per order: the kitchen window polls this every few seconds on the main process.
   getKitchenOrders() {
-    return db.prepare(`
-      SELECT s.id AS sale_id, s.sale_number, s.kitchen_status, s.created_at
-      FROM sales s
-      WHERE s.kitchen_status IN ('pending', 'preparing')
-      ORDER BY s.id ASC
-    `).all().map((sale) => ({
-      ...sale,
-      items: db.prepare('SELECT * FROM sale_items WHERE sale_id = ? AND is_kitchen_item = 1').all(sale.sale_id),
-    }));
+    const open = "kitchen_status IN ('pending', 'preparing') AND created_at >= datetime('now', 'localtime', '-1 day')";
+    const orders = db.prepare(`
+      SELECT id AS sale_id, sale_number, kitchen_status, created_at FROM sales WHERE ${open} ORDER BY id ASC
+    `).all();
+    if (orders.length === 0) return [];
+    const items = db.prepare(`
+      SELECT * FROM sale_items WHERE is_kitchen_item = 1 AND sale_id IN (SELECT id FROM sales WHERE ${open}) ORDER BY id
+    `).all();
+    const bySale = new Map(orders.map((o) => [o.sale_id, { ...o, items: [] }]));
+    for (const it of items) if (bySale.has(it.sale_id)) bySale.get(it.sale_id).items.push(it);
+    return [...bySale.values()];
   },
 
   updateKitchenStatus(saleId, status) {

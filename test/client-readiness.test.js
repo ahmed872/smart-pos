@@ -188,3 +188,33 @@ test('F17: names, barcodes and reasons reject control and bidi-override characte
   assert.equal((await c('products:list')).find((p) => p.id === id).name, 'عصير "Orange" <500ml> & ثلج');
   shutdown(ctx);
 });
+
+// ---------- Performance ----------
+
+test('F3: the kitchen screen lists only current open orders and stays fast with a large history', async () => {
+  const { ctx, c } = await admin();
+  const kitchen = await c('categories:save', 'مطبخ', true);
+  const drinks = await c('categories:save', 'مشروبات', false);
+  const food = await c('products:save', { name: 'برجر', price: 50, category_id: kitchen });
+  const juice = await c('products:save', { name: 'عصير', price: 10, category_id: drinks });
+  // a shop that never marks orders ready: thousands of old open orders
+  for (let i = 0; i < 3000; i++) await c('sales:create', { items: [{ product_id: food, qty: 1 }] });
+  ctx.store.db.prepare("UPDATE sales SET created_at = datetime('now', 'localtime', '-3 days')").run();
+  const fresh = await c('sales:create', { items: [{ product_id: food, qty: 2 }, { product_id: juice, qty: 1 }] });
+  const done = await c('sales:create', { items: [{ product_id: food, qty: 1 }] });
+  await c('kitchen:updateStatus', done.saleId, 'ready');
+  const started = process.hrtime.bigint();
+  const orders = await c('kitchen:list');
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.deepEqual(orders.map((o) => o.sale_id), [fresh.saleId]);
+  assert.deepEqual(orders[0].items.map((it) => [it.name, it.qty]), [['برجر', 2]], 'only kitchen items');
+  assert.ok(ms < 200, `kitchen list took ${ms} ms`);
+  shutdown(ctx);
+});
+
+test('F4: uploaded product photos and logos are resized before they are stored', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+  assert.match(src, /readImageFile\(file, \{ maxSize: 256, type: 'image\/jpeg' \}\)/);
+  assert.match(src, /readImageFile\(file, \{ maxSize: 600, type: 'image\/png' \}\)/);
+  assert.ok(!/reader\.onload = \(\) => \{\s*pending(ProductImage|DataUrl) = reader\.result/.test(src), 'no raw file is stored');
+});
