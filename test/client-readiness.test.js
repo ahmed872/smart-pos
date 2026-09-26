@@ -464,3 +464,21 @@ test('Part 8: native date fields use DD/MM/YYYY (Chromium UI language pinned to 
   assert.deepEqual(ctx.state.appendedSwitches, [['lang', 'en-GB']]);
   shutdown(ctx);
 });
+
+test('performance: creating a sale stays fast with a long invoice history (30,000 invoices)', async () => {
+  const { ctx, c } = await admin();
+  const A = await c('products:save', { name: 'A', price: 2 });
+  const first = await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
+  const prefix = first.saleNumber.slice(0, -6);
+  const insert = ctx.store.db.prepare('INSERT INTO sales (sale_number, subtotal, total) VALUES (?, 2, 2)');
+  ctx.store.db.transaction(() => {
+    for (let i = 2; i <= 30000; i++) insert.run(prefix + String(i).padStart(6, '0'));
+  })();
+  const started = process.hrtime.bigint();
+  let last;
+  for (let i = 0; i < 50; i++) last = await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
+  const perSale = Number(process.hrtime.bigint() - started) / 1e6 / 50;
+  assert.equal(last.saleNumber, prefix + '030050');
+  assert.ok(perSale < 5, `${perSale.toFixed(2)} ms per sale`);
+  shutdown(ctx);
+});

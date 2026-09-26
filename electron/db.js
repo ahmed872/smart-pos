@@ -197,14 +197,15 @@ function currentPeriodKey() {
 // Next number in the current numbering scheme. Only numbers of exactly this scheme count: with
 // "never" (prefix 'INV-') a monthly number like 'INV-202609-000003' must not be read as 202609.
 // The existence check keeps a sale from ever failing on a duplicate number after the scheme was
-// switched back and forth.
+// switched back and forth. The unary + keeps SQLite on the newest-first rowid scan (which stops at
+// the first match) instead of the sale_number index, which would sort every invoice on each sale.
 function nextSaleNumber() {
   const periodKey = currentPeriodKey();
   const prefix = periodKey ? `INV-${periodKey}-` : 'INV-';
   const start = prefix.length + 1;
   const row = db.prepare(`
     SELECT sale_number FROM sales
-    WHERE sale_number GLOB ? AND substr(sale_number, ?) <> '' AND substr(sale_number, ?) NOT GLOB '*[^0-9]*'
+    WHERE +sale_number GLOB ? AND substr(sale_number, ?) <> '' AND substr(sale_number, ?) NOT GLOB '*[^0-9]*'
     ORDER BY id DESC LIMIT 1
   `).get(prefix + '*', start, start);
   let n = row ? Number(row.sale_number.slice(prefix.length)) + 1 : 1;
@@ -622,11 +623,12 @@ module.exports = {
   },
 
   // ---------- Kitchen ----------
-  // Open kitchen orders from the last 24 hours (older unfinished orders are stale and would pile
-  // up forever in a shop that does not use the kitchen screen). Items come from one query instead
-  // of one per order: the kitchen window polls this every few seconds on the main process.
+  // Open kitchen orders from the last 24 hours, at most the 200 most recent (older unfinished orders
+  // are stale and would pile up forever in a shop that does not use the kitchen screen). Items come
+  // from one query instead of one per order: the kitchen window polls this every few seconds.
   getKitchenOrders() {
-    const open = "kitchen_status IN ('pending', 'preparing') AND created_at >= datetime('now', 'localtime', '-1 day')";
+    const open = `id IN (SELECT id FROM sales WHERE kitchen_status IN ('pending', 'preparing')
+      AND created_at >= datetime('now', 'localtime', '-1 day') ORDER BY id DESC LIMIT 200)`;
     const orders = db.prepare(`
       SELECT id AS sale_id, sale_number, kitchen_status, created_at FROM sales WHERE ${open} ORDER BY id ASC
     `).all();
