@@ -465,20 +465,31 @@ test('Part 8: native date fields use DD/MM/YYYY (Chromium UI language pinned to 
   shutdown(ctx);
 });
 
-test('performance: creating a sale stays fast with a long invoice history (30,000 invoices)', async () => {
+// Compares the same machine with a short and a long history (instead of an absolute time, which
+// depends on the machine and on the other test files running in parallel): the cost of a sale must
+// not grow with the number of invoices. Best of several rounds filters out scheduling noise.
+test('performance: creating a sale does not slow down with a long invoice history (30,000 invoices)', async () => {
   const { ctx, c } = await admin();
   const A = await c('products:save', { name: 'A', price: 2 });
-  const first = await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
-  const prefix = first.saleNumber.slice(0, -6);
+  const perSale = async () => {
+    let best = Infinity;
+    for (let round = 0; round < 5; round++) {
+      const started = process.hrtime.bigint();
+      for (let i = 0; i < 20; i++) await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
+      best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6 / 20);
+    }
+    return best;
+  };
+  const shortHistory = await perSale(); // 100 invoices
+  const prefix = (await c('sales:list', 1))[0].sale_number.slice(0, -6);
   const insert = ctx.store.db.prepare('INSERT INTO sales (sale_number, subtotal, total) VALUES (?, 2, 2)');
   ctx.store.db.transaction(() => {
-    for (let i = 2; i <= 30000; i++) insert.run(prefix + String(i).padStart(6, '0'));
+    for (let i = 101; i <= 30100; i++) insert.run(prefix + String(i).padStart(6, '0'));
   })();
-  const started = process.hrtime.bigint();
-  let last;
-  for (let i = 0; i < 50; i++) last = await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
-  const perSale = Number(process.hrtime.bigint() - started) / 1e6 / 50;
-  assert.equal(last.saleNumber, prefix + '030050');
-  assert.ok(perSale < 5, `${perSale.toFixed(2)} ms per sale`);
+  const longHistory = await perSale(); // 30,100 invoices
+  assert.equal((await c('sales:list', 1))[0].sale_number, prefix + '030200', 'numbering continues correctly');
+  // The index-and-sort lookup this guards against made each sale about 20x slower at this size.
+  assert.ok(longHistory < shortHistory * 4 + 1,
+    `${longHistory.toFixed(2)} ms per sale with 30,100 invoices vs ${shortHistory.toFixed(2)} ms with 100`);
   shutdown(ctx);
 });
