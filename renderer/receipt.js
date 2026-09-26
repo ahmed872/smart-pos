@@ -53,7 +53,7 @@ async function render() {
     <table class="totals">
       <tr><td>الإجمالي الفرعي</td><td style="text-align:left;">${money(sale.subtotal)}</td></tr>
       <tr><td>الخصم</td><td style="text-align:left;">${money(discount)}</td></tr>
-      <tr><td>الضريبة${rate ? ` (${rate}%)` : ''}</td><td style="text-align:left;">${money(sale.tax)}</td></tr>
+      <tr><td>الضريبة${rate ? ` (<bdi dir="ltr">${rate}%</bdi>)` : ''}</td><td style="text-align:left;">${money(sale.tax)}</td></tr>
       <tr><td>الإجمالي</td><td style="text-align:left;">${money(sale.total)}</td></tr>
       ${refunds && refunds.count > 0 ? `
         <tr><td>المرتجعات</td><td style="text-align:left;">- ${money(refunds.amount)}</td></tr>

@@ -458,3 +458,9 @@ test('Part 4: backup -> changes -> restore brings back every table exactly; bad 
   assert.equal((await again.call('auth:me')).role, 'cashier', 'employees and PINs restored');
   shutdown(again);
 });
+
+test('Part 8: native date fields use DD/MM/YYYY (Chromium UI language pinned to en-GB)', async () => {
+  const { ctx } = await admin();
+  assert.deepEqual(ctx.state.appendedSwitches, [['lang', 'en-GB']]);
+  shutdown(ctx);
+});

@@ -33,7 +33,7 @@ async function boot({ home, isPackaged = false, switches = [] } = {}) {
   const appListeners = new Map();
   const windows = [];
   const dialogQueue = { open: [], save: [], message: [] };
-  const state = { exitCode: null, relaunched: false, errorBoxes: [], messageBoxes: [] };
+  const state = { exitCode: null, relaunched: false, errorBoxes: [], messageBoxes: [], appendedSwitches: [] };
 
   class FakeBrowserWindow {
     constructor(opts) {
@@ -62,7 +62,7 @@ async function boot({ home, isPackaged = false, switches = [] } = {}) {
       relaunch: () => { state.relaunched = true; },
       exit: (code) => { state.exitCode = code; },
       quit: () => {},
-      commandLine: { hasSwitch: (name) => switches.includes(name) },
+      commandLine: { hasSwitch: (name) => switches.includes(name), appendSwitch: (name, value) => state.appendedSwitches.push([name, value]) },
     },
     BrowserWindow: FakeBrowserWindow,
     ipcMain: { handle: (channel, fn) => handlers.set(channel, fn) },

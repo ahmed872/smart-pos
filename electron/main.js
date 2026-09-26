@@ -17,6 +17,11 @@ let sessionUserId = null;
 // User-facing product name (Arabic UI); Windows installs it as "Cashier System" (productName).
 const PRODUCT_NAME = 'سيستم كاشير';
 
+// Native controls (date pickers) follow Chromium's UI language, which otherwise depends on the
+// Windows language (an English Windows shows dates as MM/DD/YYYY, so 09/10 could close the wrong
+// day). en-GB gives DD/MM/YYYY with Latin digits, the format used everywhere else in the app.
+app.commandLine.appendSwitch('lang', 'en-GB');
+
 const rendererDir = path.join(__dirname, '..', 'renderer');
 const appIconPath = path.join(rendererDir, 'assets', 'app-icon.png');
 

@@ -591,6 +591,8 @@ function resetProductForm() {
 
 function setupProductHandlers() {
   renderProductImagePreview();
+  // The native file field shows English text; the Arabic button opens it instead.
+  document.getElementById('pImagePick').addEventListener('click', () => document.getElementById('pImageInput').click());
 
   document.getElementById('pImageInput').addEventListener('change', async () => {
     const input = document.getElementById('pImageInput');
@@ -865,6 +867,7 @@ function setupLogoHandlers() {
   const fileInput = document.getElementById('logoFileInput');
   const previewBox = document.getElementById('logoPreviewBox');
   let pendingDataUrl = null;
+  document.getElementById('logoFilePick').addEventListener('click', () => fileInput.click());
 
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
