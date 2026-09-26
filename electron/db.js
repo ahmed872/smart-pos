@@ -495,6 +495,13 @@ module.exports = {
     return db.prepare('SELECT * FROM sales ORDER BY id DESC LIMIT ?').all(v.numberInRange(limit ?? 100, 'العدد', 1, 10000));
   },
 
+  // Invoice lookup by (part of) its number, e.g. to process a return for an older invoice that is
+  // no longer among the latest ones shown in the sales history.
+  findSales(query) {
+    const text = v.requiredText(query, 'رقم الفاتورة', 50).replace(/[\\%_]/g, (ch) => '\\' + ch);
+    return db.prepare("SELECT * FROM sales WHERE sale_number LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50").all(`%${text}%`);
+  },
+
   getSaleItems(saleId) {
     return db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(saleId);
   },

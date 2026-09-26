@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('api', {
   sales: {
     create: (payload) => ipcRenderer.invoke('sales:create', payload),
     list: (limit) => ipcRenderer.invoke('sales:list', limit),
+    find: (query) => ipcRenderer.invoke('sales:find', query),
     items: (saleId) => ipcRenderer.invoke('sales:items', saleId),
     full: (saleId) => ipcRenderer.invoke('sales:full', saleId),
   },

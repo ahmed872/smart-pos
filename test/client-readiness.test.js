@@ -229,3 +229,34 @@ test('F17 follow-up: the multi-line invoice QR text is still accepted (line brea
   await assert.rejects(c('print:qr', 'x'.repeat(501)), /طويل جدًا/);
   shutdown(ctx);
 });
+
+// ---------- Cashier workflow ----------
+
+test('F5: an older invoice can be found by its number (for returns), also by a cashier', async () => {
+  const { ctx, c } = await admin();
+  await c('settings:save', 'invoice_reset_period', 'never');
+  const A = await c('products:save', { name: 'A', price: 1 });
+  for (let i = 0; i < 150; i++) await c('sales:create', { items: [{ product_id: A, qty: 1 }] });
+  assert.ok(!(await c('sales:list', 100)).some((s) => s.sale_number === 'INV-000007'), 'not in the latest 100');
+  await c('users:save', { username: 'k', pin: 'kash-111', role: 'cashier' });
+  await c('auth:login', 'k', 'kash-111');
+  assert.deepEqual((await c('sales:find', 'INV-000007')).map((s) => s.sale_number), ['INV-000007']);
+  assert.equal((await c('sales:find', '00012')).length, 11, 'partial number: 000012 and 000120-000129');
+  assert.deepEqual(await c('sales:find', '%'), [], 'LIKE wildcards are matched literally');
+  assert.deepEqual(await c('sales:find', '_'), []);
+  await assert.rejects(c('sales:find', ''), /رقم الفاتورة مطلوب/);
+  await c('auth:logout');
+  await assert.rejects(c('sales:find', 'INV'), /تسجيل الدخول/);
+  shutdown(ctx);
+});
+
+test('F2/F11-F14: cashier screen guards (source checks backing the E2E run)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+  assert.match(src, /checkoutBtn\.addEventListener\('click', \(\) => runOnce\(checkoutBtn, checkout\)\)/);
+  assert.match(src, /\[data-return-item\][\s\S]*?runOnce\(btn/);
+  assert.match(src, /saveProductBtn\.addEventListener\('click', \(\) => runOnce\(saveProductBtn/);
+  assert.match(src, /confirm\(`هل تريد حذف المنتج/);
+  assert.match(src, /alert\('السعر مطلوب'\)/);
+  assert.ok(!/toISOString\(\)\.slice\(0, 10\)/.test(src), 'dates use local time');
+  assert.match(src, /يجب أن يكون تاريخ البداية قبل تاريخ النهاية/);
+});

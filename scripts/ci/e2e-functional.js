@@ -29,6 +29,7 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), 'smart-pos-e2e-'));
 
 const results = [];
 const ALL_DIALOGS = []; // every alert/confirm text shown during the whole run (all app launches)
+const PAGE_ERRORS = []; // uncaught JavaScript errors in any page during the whole run
 function check(name, ok, detail = '') {
   results.push({ name, ok: !!ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
@@ -45,6 +46,7 @@ async function launch() {
   await win.waitForLoadState('domcontentloaded');
   const dialogs = [];
   win.on('dialog', (d) => { dialogs.push(d.message()); ALL_DIALOGS.push(d.message()); d.accept().catch(() => {}); });
+  win.on('pageerror', (err) => PAGE_ERRORS.push(`${win.url().split('/').pop()}: ${err.message}`));
   return { app, win, dialogs };
 }
 
@@ -164,6 +166,7 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   let products = (await api(win, 'window.api.products.list()')).value;
   const product = products.find((p) => p.name === 'E2E-PRODUCT');
   check('admin creates product via UI', product && product.price === 25 && product.stock_qty === 5);
+
   const before = products.length;
   await addProduct('NEGATIVE', -5);
   products = (await api(win, 'window.api.products.list()')).value;
@@ -172,6 +175,54 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   const dup2 = await api(win, "window.api.products.save({name:'DUP-2',price:1,barcode:'999001'})");
   check('duplicate barcode gives a clear Arabic message', dup1.ok && !dup2.ok && /الباركود مستخدم لمنتج آخر/.test(dup2.error));
   await api(win, `window.api.products.delete(${dup1.value})`);
+
+  // a large photo (1600x1200) is resized before it is stored
+  const { PNG } = require(path.join(ROOT, 'node_modules', 'pngjs'));
+  const photo = new PNG({ width: 1600, height: 1200 });
+  for (let i = 0; i < photo.data.length; i += 4) {
+    photo.data[i] = (i * 7) % 251; photo.data[i + 1] = (i * 13) % 241; photo.data[i + 2] = (i * 3) % 239; photo.data[i + 3] = 255;
+  }
+  const photoFile = path.join(work, 'photo.png');
+  fs.writeFileSync(photoFile, PNG.sync.write(photo));
+  await win.fill('#pName', 'PHOTO-PRODUCT');
+  await win.fill('#pPrice', '3');
+  await win.setInputFiles('#pImageInput', photoFile);
+  await win.waitForTimeout(800);
+  await win.click('#saveProductBtn');
+  await win.waitForTimeout(500);
+  const stored = ((await api(win, 'window.api.products.list()')).value.find((p) => p.name === 'PHOTO-PRODUCT') || {}).image_data_url || '';
+  const dims = stored ? await win.evaluate((src) => new Promise((res) => { const i = new Image(); i.onload = () => res([i.naturalWidth, i.naturalHeight]); i.src = src; }), stored) : [0, 0];
+  check('product photo resized before saving (JPEG, at most 256 px)',
+    stored.startsWith('data:image/jpeg') && Math.max(...dims) === 256 && stored.length < 100000,
+    `${fs.statSync(photoFile).size} bytes -> ${stored.length} chars, ${dims.join('x')}`);
+
+  // an empty price is not saved as a free product
+  const countBeforeEmptyPrice = (await api(win, 'window.api.products.list()')).value.length;
+  await win.fill('#pName', 'NO-PRICE');
+  await win.fill('#pPrice', '');
+  await win.click('#saveProductBtn');
+  await win.waitForTimeout(400);
+  check('empty price is refused with a message',
+    (await api(win, 'window.api.products.list()')).value.length === countBeforeEmptyPrice && dialogs.some((m) => m === 'السعر مطلوب'));
+  await win.fill('#pName', '');
+
+  // deleting asks for confirmation first
+  await addProduct('DELETE-ME', 1);
+  const delId = (await api(win, 'window.api.products.list()')).value.find((p) => p.name === 'DELETE-ME').id;
+  await win.evaluate(() => { window.confirm = () => false; });
+  await win.fill('#productsTableSearch', 'DELETE-ME');
+  await win.waitForTimeout(200);
+  const visibleRows = await win.$$eval('#productsTableBody tr', (rows) => rows.length);
+  await win.click(`[data-delete="${delId}"]`);
+  await win.waitForTimeout(300);
+  const keptAfterCancel = (await api(win, 'window.api.products.list()')).value.some((p) => p.id === delId);
+  await win.evaluate(() => { window.confirm = () => true; });
+  await win.click(`[data-delete="${delId}"]`);
+  await win.waitForTimeout(400);
+  check('product search filters the products table', visibleRows === 1);
+  check('product delete asks for confirmation (cancel keeps it, confirm deletes it)',
+    keptAfterCancel && !(await api(win, 'window.api.products.list()')).value.some((p) => p.id === delId));
+  await win.fill('#productsTableSearch', '');
 
   await win.click('.nav-btn[data-view="settings"]');
   await win.fill('#sTax', '14');
@@ -210,17 +261,37 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   check('cashier: negative discount rejected',
     !(await api(win, `window.api.sales.create({items:[{product_id:${product.id},qty:1}],discount:-10})`)).ok);
 
+  check('POS: barcode field has the focus when the app opens', await win.evaluate(() => document.activeElement.id === 'barcodeInput'));
+  await win.fill('#productSearch', 'zzz-no-such');
+  check('POS: search with no match says so', (await win.textContent('#productGrid')).includes('لا توجد منتجات مطابقة'));
+  await win.fill('#productSearch', 'E2E-PROD');
+  check('POS: search shows only matching products', (await win.$$eval('.product-card', (cards) => cards.map((c) => c.textContent)))
+    .every((t) => t.includes('E2E-PRODUCT')));
   // answer "no" to the "print receipt?" prompt (no printer on CI)
   await win.evaluate(() => { window.confirm = () => false; });
   await win.click(`.product-card:has-text("E2E-PRODUCT")`);
-  await win.click('#checkoutBtn');
-  await win.waitForTimeout(800);
+  await win.fill('#productSearch', '');
+  // an impatient double click on "complete sale" must not create two invoices
+  await win.dblclick('#checkoutBtn');
+  await win.waitForTimeout(1000);
   let sales = (await api(win, 'window.api.sales.list(10)')).value;
-  check('cashier sale via UI', sales.length === 1 && Math.abs(sales[0].total - 28.5) < 1e-9, `total=${sales[0] && sales[0].total}`);
+  check('cashier sale via UI (double click creates exactly one invoice)', sales.length === 1 && Math.abs(sales[0].total - 28.5) < 1e-9,
+    `invoices=${sales.length} total=${sales[0] && sales[0].total}`);
+  check('POS: barcode field gets the focus back after a sale', await win.evaluate(() => document.activeElement.id === 'barcodeInput'));
 
   await win.click('.nav-btn[data-view="sales"]');
+  await win.fill('#saleSearch', 'NO-SUCH-INVOICE');
+  await win.press('#saleSearch', 'Enter');
+  await win.waitForTimeout(300);
+  check('sales history: search with no match says so', (await win.textContent('#salesTableBody')).includes('لا توجد فواتير مطابقة'));
+  await win.fill('#saleSearch', sales[0].sale_number.slice(-6));
+  await win.press('#saleSearch', 'Enter');
+  await win.waitForTimeout(300);
+  check('sales history: invoice found by its number', (await win.$$eval('[data-view-sale]', (b) => b.length)) === 1
+    && (await win.textContent('#salesTableBody')).includes(sales[0].sale_number));
   await win.click('[data-view-sale]');
   await win.waitForSelector('[data-return-item]');
+  await win.evaluate(() => { window.confirm = () => true; }); // confirm the return
   await win.click('[data-return-item]');
   await win.waitForTimeout(500);
   const full = (await api(win, `window.api.sales.full(${sales[0].id})`)).value;
@@ -320,6 +391,7 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   check('no technical/English error text was ever shown to the user',
     ALL_DIALOGS.length > 0 && ALL_DIALOGS.every((m) => !/Error invoking|remote method|SqliteError|constraint/i.test(m)),
     `${ALL_DIALOGS.length} dialogs checked`);
+  check('no uncaught JavaScript error in any page', PAGE_ERRORS.length === 0, PAGE_ERRORS.slice(0, 3).join(' || '));
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

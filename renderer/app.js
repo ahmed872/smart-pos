@@ -10,6 +10,36 @@ let editingProductId = null;
 let loadedStockValue = null; // stock shown when a product was loaded into the edit form
 let pendingProductImage = null;
 
+// Runs a button's action once per click: the button stays disabled until the action finishes,
+// so a double click (or an impatient second click) cannot create a second sale, return or product.
+async function runOnce(button, action) {
+  if (button.disabled) return undefined;
+  button.disabled = true;
+  try {
+    return await action();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Today in the computer's local time (stored dates are local time; toISOString() is UTC and
+// shows the wrong day for hours around midnight).
+function localDateString(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// The barcode field keeps the keyboard focus on the POS screen, so a scanner can be used
+// right after a sale, an added product or a message.
+function focusBarcode() {
+  if (document.getElementById('view-pos').classList.contains('active')) document.getElementById('barcodeInput').focus();
+}
+
+function matchesSearch(product, term) {
+  if (!term) return true;
+  return product.name.toLowerCase().includes(term) || (product.barcode || '').toLowerCase().includes(term);
+}
+
 async function init() {
   currentUser = await window.api.auth.me();
   if (!currentUser || currentUser.mustChangePin) {
@@ -42,10 +72,11 @@ async function init() {
   setupDayCloseHandlers();
   showAbout();
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateString();
   document.getElementById('reportFrom').value = today;
   document.getElementById('reportTo').value = today;
   document.getElementById('dayCloseDate').value = today;
+  focusBarcode();
 }
 
 function isLowStock(product) {
@@ -96,6 +127,7 @@ function setupNav() {
       document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
       document.getElementById('view-' + btn.dataset.view).classList.add('active');
       if (btn.dataset.view === 'users') await refreshUsersTable();
+      if (btn.dataset.view === 'pos') focusBarcode();
     });
   });
   document.getElementById('openKitchenBtn').addEventListener('click', () => {
@@ -115,9 +147,15 @@ function renderProductGrid() {
       : 'لا توجد منتجات بعد. يمكن للمدير إضافة المنتجات.'}</p>`;
     return;
   }
+  const term = document.getElementById('productSearch').value.trim().toLowerCase();
+  const shown = products.filter((p) => matchesSearch(p, term));
+  if (shown.length === 0) {
+    grid.innerHTML = '<p style="color:var(--text-dim);padding:12px;">لا توجد منتجات مطابقة للبحث.</p>';
+    return;
+  }
 
   const byCategory = new Map();
-  for (const p of products) {
+  for (const p of shown) {
     const key = p.category_id || 'none';
     if (!byCategory.has(key)) byCategory.set(key, []);
     byCategory.get(key).push(p);
@@ -149,7 +187,10 @@ function renderProductGrid() {
         <div class="price">${p.price.toFixed(2)} ${settings.currency || ''}</div>
         <div class="stock">${isLowStock(p) ? '⚠ ' : ''}${stockLabel}</div>
       `;
-      card.addEventListener('click', () => addToCart(p));
+      card.addEventListener('click', () => {
+        addToCart(p);
+        focusBarcode();
+      });
       grid.appendChild(card);
     }
   }
@@ -157,7 +198,8 @@ function renderProductGrid() {
 
 function renderCategorySelect() {
   const select = document.getElementById('pCategory');
-  select.innerHTML = categories.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  select.innerHTML = '<option value="">بدون فئة</option>'
+    + categories.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
 }
 
 function addToCart(product) {
@@ -245,62 +287,98 @@ function setupPosHandlers() {
     const product = products.find((p) => p.barcode === code);
     if (!product) {
       alert('لا يوجد منتج بهذا الباركود: ' + code);
+      focusBarcode();
       return;
     }
     addToCart(product);
+    focusBarcode();
   });
+
+  document.getElementById('productSearch').addEventListener('input', renderProductGrid);
+  document.getElementById('saleSearch').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchSales();
+  });
+  document.getElementById('saleSearch').addEventListener('search', searchSales); // the field's clear (x) button
 
   document.getElementById('clearCartBtn').addEventListener('click', () => {
     cart = [];
     renderCart();
+    focusBarcode();
   });
 
-  document.getElementById('checkoutBtn').addEventListener('click', async () => {
-    if (cart.length === 0) {
-      alert('الفاتورة فارغة');
-      return;
-    }
-    const discount = Number(document.getElementById('discountInput').value) || 0;
-    const taxPercent = Number(settings.tax_percent) || 0;
-    const paymentMethod = document.getElementById('paymentMethod').value;
+  const checkoutBtn = document.getElementById('checkoutBtn');
+  checkoutBtn.addEventListener('click', () => runOnce(checkoutBtn, checkout));
+}
 
-    let result;
+// The cart is sent once per click (see runOnce); the database decides prices, tax and stock.
+async function checkout() {
+  if (cart.length === 0) {
+    alert('الفاتورة فارغة');
+    focusBarcode();
+    return;
+  }
+  const discount = Number(document.getElementById('discountInput').value) || 0;
+  const taxPercent = Number(settings.tax_percent) || 0;
+  const paymentMethod = document.getElementById('paymentMethod').value;
+
+  let result;
+  try {
+    result = await window.api.sales.create({
+      items: cart,
+      discount,
+      taxPercent,
+      paymentMethod,
+    });
+  } catch (err) {
+    alert(userMessage(err));
+    focusBarcode();
+    return;
+  }
+
+  cart = [];
+  document.getElementById('discountInput').value = 0;
+  renderCart();
+  products = await window.api.products.list();
+  renderProductGrid();
+  updateLowStockBadge();
+  await refreshSalesTable();
+
+  const wantsPrint = confirm(`تم إتمام البيع - فاتورة رقم ${result.saleNumber} بإجمالي ${window.StoreIdentity.money(result.total, settings.currency)}\n\nهل تريد طباعة الفاتورة؟`);
+  if (wantsPrint) {
     try {
-      result = await window.api.sales.create({
-        items: cart,
-        discount,
-        taxPercent,
-        paymentMethod,
-      });
+      await window.api.print.receipt(result.saleId);
     } catch (err) {
       alert(userMessage(err));
-      return;
     }
-
-    cart = [];
-    document.getElementById('discountInput').value = 0;
-    renderCart();
-    products = await window.api.products.list();
-    renderProductGrid();
-    updateLowStockBadge();
-    await refreshSalesTable();
-
-    const wantsPrint = confirm(`تم إتمام البيع - فاتورة رقم ${result.saleNumber} بإجمالي ${result.total.toFixed(2)}\n\nهل تريد طباعة الفاتورة؟`);
-    if (wantsPrint) {
-      try {
-        await window.api.print.receipt(result.saleId);
-      } catch (err) {
-        alert(userMessage(err));
-      }
-    }
-  });
+  }
+  focusBarcode();
 }
 
 async function refreshSalesTable() {
-  const sales = await window.api.sales.list(100);
+  renderSalesRows(await window.api.sales.list(100), 'لا توجد فواتير بعد.');
+}
+
+async function searchSales() {
+  const query = document.getElementById('saleSearch').value.trim();
+  document.getElementById('saleDetailBox').style.display = 'none';
+  if (!query) {
+    document.getElementById('salesListNote').textContent = 'آخر 100 فاتورة. للوصول إلى فاتورة أقدم ابحث برقمها.';
+    await refreshSalesTable();
+    return;
+  }
+  try {
+    const found = await window.api.sales.find(query);
+    document.getElementById('salesListNote').textContent = `نتائج البحث عن "${query}" (حتى 50 فاتورة).`;
+    renderSalesRows(found, 'لا توجد فواتير مطابقة لهذا الرقم.');
+  } catch (err) {
+    alert(userMessage(err));
+  }
+}
+
+function renderSalesRows(sales, emptyText) {
   const body = document.getElementById('salesTableBody');
   if (sales.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" style="color:var(--text-dim);">لا توجد فواتير بعد.</td></tr>';
+    body.innerHTML = `<tr><td colspan="5" style="color:var(--text-dim);">${escapeHtml(emptyText)}</td></tr>`;
     return;
   }
   body.innerHTML = sales.map((s) => `
@@ -350,7 +428,7 @@ async function showSaleDetail(saleId) {
               <td>${it.unit_price.toFixed(2)}</td>
               <td>
                 ${remaining > 0 ? `
-                  <input type="number" min="1" max="${remaining}" value="1" style="width:50px;" id="retQty-${it.id}" />
+                  <input type="number" min="${Number.isInteger(it.qty) ? 1 : 0.001}" step="${Number.isInteger(it.qty) ? 1 : 'any'}" max="${remaining}" value="${Math.min(1, remaining)}" style="width:60px;" id="retQty-${it.id}" />
                   <input type="text" placeholder="السبب (اختياري)" style="width:120px;" id="retReason-${it.id}" />
                   <button class="secondary" data-return-item="${it.id}" data-sale="${saleId}">إرجاع</button>
                 ` : 'مكتمل'}
@@ -363,11 +441,22 @@ async function showSaleDetail(saleId) {
   `;
 
   box.querySelectorAll('[data-return-item]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => runOnce(btn, async () => {
       const saleItemId = Number(btn.dataset.returnItem);
       const saleIdVal = Number(btn.dataset.sale);
-      const qty = Number(document.getElementById(`retQty-${saleItemId}`).value);
+      const line = data.items.find((it) => it.id === saleItemId);
+      const qtyText = document.getElementById(`retQty-${saleItemId}`).value.trim();
+      const qty = Number(qtyText);
       const reason = document.getElementById(`retReason-${saleItemId}`).value.trim();
+      if (!qtyText || !(qty > 0)) {
+        alert('أدخل الكمية المطلوب إرجاعها');
+        return;
+      }
+      if (Number.isInteger(line.qty) && !Number.isInteger(qty)) {
+        alert('أدخل عددًا صحيحًا للكمية المطلوب إرجاعها');
+        return;
+      }
+      if (!confirm(`تأكيد إرجاع ${qty} من "${line.name}" من الفاتورة ${data.sale.sale_number}؟`)) return;
       try {
         const result = await window.api.returns.create({ saleId: saleIdVal, saleItemId, qty, reason });
         alert(`تم تسجيل الإرجاع. المبلغ المسترد: ${result.refundedAmount.toFixed(2)} ${settings.currency || ''}`);
@@ -378,13 +467,20 @@ async function showSaleDetail(saleId) {
       } catch (err) {
         alert(userMessage(err));
       }
-    });
+    }));
   });
 }
 
 async function refreshProductsTable() {
   const body = document.getElementById('productsTableBody');
-  body.innerHTML = products.map((p) => `
+  const term = document.getElementById('productsTableSearch').value.trim().toLowerCase();
+  const shown = products.filter((p) => matchesSearch(p, term));
+  if (shown.length === 0) {
+    body.innerHTML = `<tr><td colspan="6" style="color:var(--text-dim);">${products.length === 0
+      ? 'لا توجد منتجات بعد. أضف أول منتج من النموذج أعلاه.' : 'لا توجد منتجات مطابقة للبحث.'}</td></tr>`;
+    return;
+  }
+  body.innerHTML = shown.map((p) => `
     <tr${isLowStock(p) ? ' style="background:#fef3c7;"' : ''}>
       <td>${p.image_data_url ? `<img src="${p.image_data_url}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;" />` : '—'}</td>
       <td>${escapeHtml(p.name)}</td>
@@ -398,18 +494,21 @@ async function refreshProductsTable() {
     </tr>
   `).join('');
   body.querySelectorAll('[data-delete]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => runOnce(btn, async () => {
+      const product = products.find((p) => p.id === Number(btn.dataset.delete));
+      if (!product || !confirm(`هل تريد حذف المنتج "${product.name}"؟\nلن يظهر في نقطة البيع بعد الحذف، وتبقى فواتيره السابقة كما هي.`)) return;
       try {
-        await window.api.products.delete(Number(btn.dataset.delete));
+        await window.api.products.delete(product.id);
       } catch (err) {
         alert(userMessage(err));
         return;
       }
+      if (editingProductId === product.id) resetProductForm();
       products = await window.api.products.list();
       renderProductGrid();
       updateLowStockBadge();
       await refreshProductsTable();
-    });
+    }));
   });
   body.querySelectorAll('[data-edit]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -507,16 +606,21 @@ function setupProductHandlers() {
     renderProductImagePreview();
   });
 
-  document.getElementById('saveProductBtn').addEventListener('click', async () => {
+  document.getElementById('productsTableSearch').addEventListener('input', refreshProductsTable);
+
+  const saveProductBtn = document.getElementById('saveProductBtn');
+  saveProductBtn.addEventListener('click', () => runOnce(saveProductBtn, async () => {
     const name = document.getElementById('pName').value.trim();
     if (!name) { alert('اسم المنتج مطلوب'); return; }
+    // An empty or unreadable price must not silently become a free product.
+    if (document.getElementById('pPrice').value.trim() === '') { alert('السعر مطلوب'); return; }
     try {
       await window.api.products.save({
         id: editingProductId,
         name,
         barcode: document.getElementById('pBarcode').value.trim(),
         category_id: Number(document.getElementById('pCategory').value) || null,
-        price: Number(document.getElementById('pPrice').value) || 0,
+        price: Number(document.getElementById('pPrice').value),
         cost: Number(document.getElementById('pCost').value) || 0,
         // When editing, the stock is only sent if it was changed here, so sales made since the
         // form was opened are never overwritten by the stock shown in the form.
@@ -535,7 +639,7 @@ function setupProductHandlers() {
     renderProductGrid();
     updateLowStockBadge();
     await refreshProductsTable();
-  });
+  }));
 
   document.getElementById('cancelEditBtn').addEventListener('click', resetProductForm);
 }
@@ -613,12 +717,27 @@ function summaryRows(summary) {
   ];
 }
 
+// Reads and checks the report period; shows a message and returns null when it is not usable.
+function reportPeriod() {
+  const from = document.getElementById('reportFrom').value;
+  const to = document.getElementById('reportTo').value;
+  if (!from || !to) { alert('اختر الفترة أولاً'); return null; }
+  if (from > to) { alert('يجب أن يكون تاريخ البداية قبل تاريخ النهاية أو مساويًا له'); return null; }
+  return { from, to };
+}
+
 function setupReportsHandlers() {
-  document.getElementById('loadReportBtn').addEventListener('click', async () => {
-    const from = document.getElementById('reportFrom').value;
-    const to = document.getElementById('reportTo').value;
-    const summary = await window.api.reports.summary(from, to);
-    const currency = settings.currency || '';
+  const loadBtn = document.getElementById('loadReportBtn');
+  loadBtn.addEventListener('click', () => runOnce(loadBtn, async () => {
+    const period = reportPeriod();
+    if (!period) return;
+    let summary;
+    try {
+      summary = await window.api.reports.summary(period.from, period.to);
+    } catch (err) {
+      alert(userMessage(err));
+      return;
+    }
     const box = document.getElementById('reportResults');
 
     box.innerHTML = `
@@ -631,29 +750,28 @@ function setupReportsHandlers() {
       <table>
         <thead><tr><th>المنتج</th><th>الكمية المباعة</th><th>الإيراد</th></tr></thead>
         <tbody>
+          ${summary.topProducts.length === 0 ? '<tr><td colspan="3" style="color:var(--text-dim);">لا توجد مبيعات في هذه الفترة.</td></tr>' : ''}
           ${summary.topProducts.map((p) => `
             <tr><td>${escapeHtml(p.name)}</td><td>${p.qty_sold}</td><td>${p.revenue.toFixed(2)}</td></tr>
           `).join('')}
         </tbody>
       </table>
     `;
-  });
+  }));
 
-  document.getElementById('exportPdfBtn').addEventListener('click', async () => {
-    const from = document.getElementById('reportFrom').value;
-    const to = document.getElementById('reportTo').value;
-    if (!from || !to) { alert('اختر الفترة أولاً'); return; }
-    const filePath = await window.api.reports.exportPdf(from, to);
-    if (filePath) alert('تم حفظ التقرير: ' + filePath);
-  });
-
-  document.getElementById('exportExcelBtn').addEventListener('click', async () => {
-    const from = document.getElementById('reportFrom').value;
-    const to = document.getElementById('reportTo').value;
-    if (!from || !to) { alert('اختر الفترة أولاً'); return; }
-    const filePath = await window.api.reports.exportExcel(from, to);
-    if (filePath) alert('تم حفظ التقرير: ' + filePath);
-  });
+  for (const [id, exporter] of [['exportPdfBtn', 'exportPdf'], ['exportExcelBtn', 'exportExcel']]) {
+    const btn = document.getElementById(id);
+    btn.addEventListener('click', () => runOnce(btn, async () => {
+      const period = reportPeriod();
+      if (!period) return;
+      try {
+        const filePath = await window.api.reports[exporter](period.from, period.to);
+        if (filePath) alert('تم حفظ التقرير: ' + filePath);
+      } catch (err) {
+        alert(userMessage(err));
+      }
+    }));
+  }
 }
 
 let usersList = [];
@@ -723,14 +841,24 @@ async function setupBackupHandlers() {
   const dbPath = await window.api.backup.currentPath();
   document.getElementById('dbPathText').textContent = 'مكان قاعدة البيانات الحالية: ' + dbPath;
 
-  document.getElementById('createBackupBtn').addEventListener('click', async () => {
-    const filePath = await window.api.backup.create();
-    if (filePath) alert('تم حفظ النسخة الاحتياطية في:\n' + filePath);
-  });
+  const createBtn = document.getElementById('createBackupBtn');
+  createBtn.addEventListener('click', () => runOnce(createBtn, async () => {
+    try {
+      const filePath = await window.api.backup.create();
+      if (filePath) alert('تم حفظ النسخة الاحتياطية في:\n' + filePath);
+    } catch (err) {
+      alert(userMessage(err));
+    }
+  }));
 
-  document.getElementById('restoreBackupBtn').addEventListener('click', async () => {
-    await window.api.backup.restore();
-  });
+  const restoreBtn = document.getElementById('restoreBackupBtn');
+  restoreBtn.addEventListener('click', () => runOnce(restoreBtn, async () => {
+    try {
+      await window.api.backup.restore();
+    } catch (err) {
+      alert(userMessage(err));
+    }
+  }));
 }
 
 function setupLogoHandlers() {
@@ -794,7 +922,13 @@ function setupDayCloseHandlers() {
   document.getElementById('loadDayCloseBtn').addEventListener('click', async () => {
     const date = document.getElementById('dayCloseDate').value;
     if (!date) { alert('اختر التاريخ أولاً'); return; }
-    const closing = await window.api.reports.dailyClosing(date);
+    let closing;
+    try {
+      closing = await window.api.reports.dailyClosing(date);
+    } catch (err) {
+      alert(userMessage(err));
+      return;
+    }
     const currency = settings.currency || '';
     document.getElementById('dayCloseResults').innerHTML = `
       <div class="card-box" style="max-width:500px;">

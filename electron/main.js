@@ -153,10 +153,15 @@ async function exportReportPdf(fromDate, toDate) {
   return filePath;
 }
 
+function localDate() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 async function createBackup() {
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
     title: 'حفظ نسخة احتياطية',
-    defaultPath: `cashier-system-backup-${new Date().toISOString().slice(0, 10)}.db`,
+    defaultPath: `cashier-system-backup-${localDate()}.db`,
     filters: [{ name: 'SQLite Database', extensions: ['db'] }],
   });
   if (canceled || !filePath) return null;
@@ -438,6 +443,7 @@ function registerIpcHandlers() {
 
   handle('sales:create', Access.USER, (user, payload) => store.createSale({ ...payload, userId: user.id }));
   handle('sales:list', Access.USER, (_user, limit) => store.getSales(limit));
+  handle('sales:find', Access.USER, (_user, query) => store.findSales(query));
   handle('sales:items', Access.USER, (_user, saleId) => store.getSaleItems(v.positiveId(saleId, 'الفاتورة')));
   handle('sales:full', Access.USER, (_user, saleId) => store.getSaleFull(v.positiveId(saleId, 'الفاتورة')));
 

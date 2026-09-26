@@ -27,7 +27,8 @@
       <!-- POS View -->
       <section class="view active" id="view-pos">
         <div class="pos-toolbar">
-          <input id="barcodeInput" placeholder="امسح الباركود أو اكتبه واضغط Enter" autocomplete="off" />
+          <input id="barcodeInput" placeholder="امسح الباركود أو اكتبه واضغط Enter" autocomplete="off" autofocus />
+          <input id="productSearch" type="search" placeholder="ابحث عن منتج بالاسم" autocomplete="off" />
         </div>
         <div class="pos-layout">
           <div class="product-grid" id="productGrid"></div>
@@ -75,6 +76,9 @@
           <button class="primary" id="saveProductBtn">حفظ المنتج</button>
           <button class="secondary" id="cancelEditBtn" style="margin-top:8px;display:none;">إلغاء التعديل</button>
         </div>
+        <div class="form-row" style="max-width:420px;">
+          <input id="productsTableSearch" type="search" placeholder="ابحث عن منتج بالاسم أو الباركود" autocomplete="off" />
+        </div>
         <table>
           <thead><tr><th></th><th>الاسم</th><th>الفئة</th><th>السعر</th><th>المخزون</th><th></th></tr></thead>
           <tbody id="productsTableBody"></tbody>
@@ -84,6 +88,10 @@
       <!-- Sales View -->
       <section class="view" id="view-sales">
         <h2>سجل المبيعات</h2>
+        <div class="form-row" style="max-width:420px;">
+          <input id="saleSearch" type="search" placeholder="ابحث برقم الفاتورة ثم اضغط Enter" autocomplete="off" dir="ltr" />
+        </div>
+        <p id="salesListNote" style="color:var(--text-dim);font-size:12px;margin:0 0 8px;">آخر 100 فاتورة. للوصول إلى فاتورة أقدم ابحث برقمها.</p>
         <table>
           <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الإجمالي</th><th>طريقة الدفع</th><th></th></tr></thead>
           <tbody id="salesTableBody"></tbody>

@@ -75,6 +75,8 @@ body {
 .pos-toolbar {
   margin-bottom: 10px;
   flex-shrink: 0;
+  display: flex;
+  gap: 8px;
 }
 .pos-toolbar input {
   width: 100%;
@@ -181,6 +183,7 @@ button.secondary {
   cursor: pointer;
 }
 button.secondary:hover { background: var(--border); }
+button:disabled { opacity: 0.6; cursor: wait; }
 
 table { width: 100%; border-collapse: collapse; }
 table th, table td { padding: 10px; border-bottom: 1px solid var(--border); text-align: right; }
