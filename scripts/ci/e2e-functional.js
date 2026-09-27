@@ -341,11 +341,37 @@ async function stubDialogs(app, { save, open, response = 1 }) {
   check('sales report print: store name and consistent labels', reportText.includes(STORE.name) && reportText.includes('الصافي شامل الضريبة'));
   await win.goto(page('index.html'));
   await win.waitForLoadState('domcontentloaded');
+  // What actually goes to the printer / into the PDF, captured in the main process at the moment
+  // of printing (the system print dialog itself cannot run on CI). It must be the rendered
+  // document, never the "loading" placeholder the page starts with.
+  await app.evaluate(({ webContents }) => {
+    globalThis.__printed = [];
+    const proto = Object.getPrototypeOf(webContents.getAllWebContents()[0]);
+    const text = (wc) => wc.executeJavaScript('document.body.innerText');
+    proto.print = function print(_options, callback) {
+      text(this).then((t) => { globalThis.__printed.push(t); callback(true, ''); }, () => callback(false, 'failed'));
+    };
+    const toPdf = proto.printToPDF;
+    proto.printToPDF = function printToPDF(options) {
+      return text(this).then((t) => { globalThis.__printed.push(t); return toPdf.call(this, options); });
+    };
+  });
+  const printedReceiptCall = await api(win, `window.api.print.receipt(${sales[0].id})`);
+  const printedClosingCall = await api(win, `window.api.print.dayClose('${day}')`);
   const pdfFile = path.join(work, 'report.pdf');
   const xlsxFile = path.join(work, 'report.xlsx');
   await stubDialogs(app, { save: pdfFile, open: backupFile });
   check('PDF export', (await api(win, `window.api.reports.exportPdf('${day}','${day}')`)).ok
     && fs.existsSync(pdfFile) && fs.readFileSync(pdfFile).subarray(0, 4).toString() === '%PDF');
+  const [printedReceipt = '', printedClosing = '', printedPdf = ''] = await app.evaluate(() => globalThis.__printed);
+  const notPlaceholder = (t) => !t.includes('جاري التحميل');
+  check('printed receipt is the complete invoice (not the loading text)', printedReceiptCall.ok && notPlaceholder(printedReceipt)
+    && printedReceipt.includes(STORE.name) && printedReceipt.includes(sales[0].sale_number) && printedReceipt.includes('الإجمالي'),
+  printedReceipt.split('\n').slice(0, 3).join(' | '));
+  check('printed daily closing is the complete report', printedClosingCall.ok && notPlaceholder(printedClosing)
+    && printedClosing.includes('تقرير إغلاق اليوم') && printedClosing.includes('الصافي بعد المرتجعات'), printedClosing.split('\n').slice(0, 2).join(' | '));
+  check('PDF report content is the complete report', notPlaceholder(printedPdf) && printedPdf.includes(STORE.name)
+    && printedPdf.includes('الصافي شامل الضريبة'), printedPdf.split('\n').slice(0, 2).join(' | '));
   await stubDialogs(app, { save: xlsxFile, open: backupFile });
   check('Excel export', (await api(win, `window.api.reports.exportExcel('${day}','${day}')`)).ok
     && fs.existsSync(xlsxFile) && fs.readFileSync(xlsxFile).subarray(0, 2).toString() === 'PK' && fs.statSync(xlsxFile).size > 1000);

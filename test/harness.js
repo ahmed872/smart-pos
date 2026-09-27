@@ -41,6 +41,7 @@ async function boot({ home, isPackaged = false, switches = [] } = {}) {
       this.webContents = {
         on() {},
         print(_o, cb) { cb(true); },
+        executeJavaScript: async () => true, // print pages report themselves rendered
         printToPDF: async () => Buffer.from('%PDF'),
       };
       windows.push(this);

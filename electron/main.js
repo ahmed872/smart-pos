@@ -90,46 +90,44 @@ function printError(reason) {
   return new Error('تعذرت الطباعة. تأكد من توصيل الطابعة وتشغيلها ثم حاول مرة أخرى.');
 }
 
-function printReceipt(saleId) {
-  return new Promise((resolve, reject) => {
-    const receiptWindow = new BrowserWindow({
-      width: 380,
-      height: 600,
-      show: false,
-      webPreferences: secureWebPreferences(),
-    });
-    receiptWindow.loadFile(path.join(__dirname, '..', 'renderer', 'receipt.html'), {
-      query: { saleId: String(saleId) },
-    });
-    receiptWindow.webContents.on('did-finish-load', () => {
-      receiptWindow.webContents.print({ silent: false }, (success, reason) => {
-        receiptWindow.close();
+// Print pages fill themselves in after loading (the invoice, closing or report comes over IPC).
+// Printing on did-finish-load printed the "loading" placeholder, so the window is only used once
+// the page has marked itself rendered.
+async function loadRenderedPage(win, page, query) {
+  await win.loadFile(path.join(rendererDir, page), { query });
+  const deadline = Date.now() + 15000;
+  while (!(await win.webContents.executeJavaScript("document.documentElement.dataset.rendered === 'true'"))) {
+    if (Date.now() > deadline) throw new Error('تعذر تجهيز الصفحة للطباعة. حاول مرة أخرى.');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+async function printPage(page, query) {
+  const win = new BrowserWindow({
+    width: 380,
+    height: 600,
+    show: false,
+    webPreferences: secureWebPreferences(),
+  });
+  try {
+    await loadRenderedPage(win, page, query);
+    return await new Promise((resolve, reject) => {
+      win.webContents.print({ silent: false }, (success, reason) => {
         if (success) resolve(true);
         else reject(printError(reason));
       });
     });
-  });
+  } finally {
+    win.close();
+  }
+}
+
+function printReceipt(saleId) {
+  return printPage('receipt.html', { saleId: String(saleId) });
 }
 
 function printDayClose(date) {
-  return new Promise((resolve, reject) => {
-    const closeWindow = new BrowserWindow({
-      width: 380,
-      height: 600,
-      show: false,
-      webPreferences: secureWebPreferences(),
-    });
-    closeWindow.loadFile(path.join(__dirname, '..', 'renderer', 'day-close.html'), {
-      query: { date },
-    });
-    closeWindow.webContents.on('did-finish-load', () => {
-      closeWindow.webContents.print({ silent: false }, (success, reason) => {
-        closeWindow.close();
-        if (success) resolve(true);
-        else reject(printError(reason));
-      });
-    });
-  });
+  return printPage('day-close.html', { date });
 }
 
 async function exportReportPdf(fromDate, toDate) {
@@ -147,14 +145,13 @@ async function exportReportPdf(fromDate, toDate) {
     webPreferences: secureWebPreferences(),
   });
 
-  await reportWindow.loadFile(path.join(__dirname, '..', 'renderer', 'report-print.html'), {
-    query: { from: fromDate, to: toDate },
-  });
-  await new Promise((resolve) => setTimeout(resolve, 700));
-
-  const pdfBuffer = await reportWindow.webContents.printToPDF({ printBackground: true });
-  fs.writeFileSync(filePath, pdfBuffer);
-  reportWindow.close();
+  try {
+    await loadRenderedPage(reportWindow, 'report-print.html', { from: fromDate, to: toDate });
+    const pdfBuffer = await reportWindow.webContents.printToPDF({ printBackground: true });
+    fs.writeFileSync(filePath, pdfBuffer);
+  } finally {
+    reportWindow.close();
+  }
   return filePath;
 }
 

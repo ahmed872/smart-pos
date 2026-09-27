@@ -47,4 +47,7 @@ async function render() {
   `;
 }
 
-render();
+// The main process prints this page only once it is marked rendered (data loaded, images decoded).
+render()
+  .then(() => Promise.all([...document.images].map((img) => img.decode().catch(() => {}))))
+  .finally(() => { document.documentElement.dataset.rendered = 'true'; });
