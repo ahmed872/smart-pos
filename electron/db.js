@@ -73,6 +73,17 @@ const SETTING_DEFAULTS = {
 const insertMissingSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
 for (const [key, value] of Object.entries(SETTING_DEFAULTS)) insertMissingSetting.run(key, value);
 
+// Installations that started on version 1.0/1.1 still carry that version's default store name and
+// logo (see retired-defaults.js). They are cleared here, on every start (also after restoring an
+// older backup); a name or logo the store chose itself never matches and is never changed.
+const RETIRED_DEFAULTS = require('./retired-defaults.js');
+for (const [key, digest] of Object.entries(RETIRED_DEFAULTS)) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  if (row && row.value && crypto.createHash('sha256').update(row.value).digest('hex') === digest) {
+    db.prepare("UPDATE settings SET value = '' WHERE key = ?").run(key);
+  }
+}
+
 // ---------- Money ----------
 // Amounts are kept in the currency's minor unit precision (2 decimals, as printed on every
 // invoice and report), so what the database adds up is exactly what customers were shown and paid.

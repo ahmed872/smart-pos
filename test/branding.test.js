@@ -67,12 +67,13 @@ test('regression: a store named "متجري" keeps its name across restarts', as
   }
 });
 
-test('upgrade keeps an existing installation\'s branding, currency and catalog untouched', async () => {
+test('upgrade removes the organization name left by v1.0/v1.1 defaults; the store\'s own branding, currency and catalog stay', async () => {
   const home = makeTempHome();
   let ctx = await boot({ home });
   await ctx.call('auth:setupAdmin', 'owner', PIN);
   shutdown(ctx);
-  // what a v1.0.0/v1.1.0 install looks like: organization defaults and the demo catalog
+  // what a v1.0.0/v1.1.0 install looks like: the organization's default name, plus a logo, currency
+  // and catalog of the store's own
   const raw = new Database(dbFile(home));
   const set = raw.prepare('UPDATE settings SET value = ? WHERE key = ?');
   set.run(ORG_NAME, 'store_name');
@@ -84,12 +85,19 @@ test('upgrade keeps an existing installation\'s branding, currency and catalog u
   for (let i = 0; i < 2; i++) {
     ctx = await restart(home);
     const s = await ctx.call('settings:get');
-    assert.equal(s.store_name, ORG_NAME);
-    assert.equal(s.logo_data_url, LOGO);
+    assert.equal(s.store_name, '', 'the organization name is gone');
+    assert.equal(s.logo_data_url, LOGO, 'a logo the store chose is kept');
     assert.equal(s.currency, 'ج.م');
     assert.deepEqual((await ctx.call('products:list')).map((p) => p.name), ['برجر لحم']);
     shutdown(ctx);
   }
+  // a store's own name (even one that merely mentions a similar phrase) is never changed
+  const own = new Database(dbFile(home));
+  own.prepare("UPDATE settings SET value = ? WHERE key = 'store_name'").run(`فرع ${ORG_NAME}`);
+  own.close();
+  ctx = await restart(home);
+  assert.equal((await ctx.call('settings:get')).store_name, `فرع ${ORG_NAME}`);
+  shutdown(ctx);
 });
 
 test('databases missing settings rows get neutral defaults, never an organization logo', async () => {

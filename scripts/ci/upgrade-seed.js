@@ -39,6 +39,7 @@ const PROFILE = {
       returnsForSale: (await window.api.returns.forSale(sale.saleId)).map((r) => ({ qty: r.qty, refunded_amount: r.refunded_amount })),
       saleId: sale.saleId,
       settings: { ...settings, logo_data_url: settings.logo_data_url ? `len:${settings.logo_data_url.length}` : '' },
+      rawIdentity: { store_name: settings.store_name, logo_data_url: settings.logo_data_url },
     };
   }, { owner: OWNER, profile: PROFILE });
   // Back up with the old version (native save dialog replaced in its main process).
@@ -49,6 +50,10 @@ const PROFILE = {
   await win.evaluate(() => window.api.backup.create());
   if (!fs.existsSync(backupFile)) throw new Error('old-version backup was not created');
   snap.backupFile = backupFile;
+  // fingerprints of the old store name and logo, to check the removal of v1.0/v1.1 defaults
+  const sha = (text) => require('node:crypto').createHash('sha256').update(text || '').digest('hex');
+  snap.settingsSha = { store_name: sha(snap.rawIdentity.store_name), logo_data_url: sha(snap.rawIdentity.logo_data_url) };
+  delete snap.rawIdentity;
   await app.close();
   fs.writeFileSync(process.argv[2], JSON.stringify(snap, null, 2));
   console.log(`snapshot: ${snap.users.length} users, ${snap.products.length} products, ${snap.sales.length} sales, store "${snap.settings.store_name}"`);

@@ -13,6 +13,14 @@ const results = [];
 const check = (name, ok, detail = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// The v1.0/v1.1 default store name and logo (an organization's identity) are removed on upgrade;
+// every other setting must come through unchanged.
+const RETIRED_DEFAULTS = require(path.join(ROOT, 'electron', 'retired-defaults.js'));
+const expectedSettings = { ...snap.settings };
+for (const [key, digest] of Object.entries(RETIRED_DEFAULTS)) {
+  if (snap.settingsSha && snap.settingsSha[key] === digest) expectedSettings[key] = '';
+}
+
 // Settings the new version adds to databases that do not have them yet, and their neutral defaults.
 const NEW_SETTING_DEFAULTS = { store_address: '', store_phone: '', tax_number: '', commercial_register: '', receipt_footer: 'شكرًا لتعاملكم معنا' };
 
@@ -58,7 +66,9 @@ const readData = (win, s) => win.evaluate(async (s) => {
   check('sales preserved', same(r.sales, snap.sales), `${r.sales.length} sales`);
   check('returns preserved', same(r.returnsForSale, snap.returnsForSale));
   for (const k of Object.keys(snap.settings)) {
-    check(`setting preserved: ${k}`, r.settings[k] === snap.settings[k], `${JSON.stringify(snap.settings[k])} -> ${JSON.stringify(r.settings[k])}`);
+    const retired = expectedSettings[k] !== snap.settings[k];
+    check(retired ? `old default removed: ${k}` : `setting preserved: ${k}`, r.settings[k] === expectedSettings[k],
+      `${JSON.stringify(snap.settings[k])} -> ${JSON.stringify(r.settings[k])}`);
   }
   const added = Object.keys(NEW_SETTING_DEFAULTS).filter((k) => !(k in snap.settings));
   if (added.length) {
@@ -87,7 +97,7 @@ const readData = (win, s) => win.evaluate(async (s) => {
     check('restored backup: employees, products, categories, sales, returns',
       same(b.users, snap.users) && same(b.products, snap.products) && same(b.categories, snap.categories)
       && same(b.sales, snap.sales) && same(b.returnsForSale, snap.returnsForSale), `${b.products.length} products`);
-    check('restored backup: settings and branding', Object.keys(snap.settings).every((k) => b.settings[k] === snap.settings[k]));
+    check('restored backup: settings and branding', Object.keys(snap.settings).every((k) => b.settings[k] === expectedSettings[k]));
   }
   await app.close();
   const failed = results.filter((x) => !x).length;
