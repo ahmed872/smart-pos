@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        from: [v1.1.0, v1.2.0]
+        from: [v1.1.0, v1.2.0, v1.3.0]
     steps:
       - uses: actions/checkout@v4
         with:
